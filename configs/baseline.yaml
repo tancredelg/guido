@@ -1,0 +1,52 @@
+# ── Guido – Baseline config (Milestone 1) ────────────────────────────────────
+# Override any value on the CLI:
+#   python src/train.py --config configs/baseline.yaml --epochs 80
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+data_dir:       data          # relative to repo root; override for SCITAS scratch
+checkpoint_dir: checkpoints
+
+# ── Reproducibility ───────────────────────────────────────────────────────────
+seed: 42
+
+# ── Data loading ──────────────────────────────────────────────────────────────
+batch_size:  64
+num_workers: 4                # set to 0 if you hit shared-memory issues on SCITAS
+
+# ── Architecture ──────────────────────────────────────────────────────────────
+# DINOv3 loaded via torch.hub from a local repo clone + downloaded weights.
+#
+# Setup (once, on a login node or anywhere with internet + the weights .pth):
+#   git clone https://github.com/facebookresearch/dinov3.git $SCRATCH/dinov3
+#   wget -O $SCRATCH/dinov3/weights/dinov3_vits16_pretrain_lvd1689m.pth \
+#        "<URL from Meta access email>"
+#
+# Then fill in the two paths below (or override them in the SLURM script via
+# --data-dir / env-var substitution – see scripts/submit_train.sh).
+dino_model:    dinov3_vits16
+dino_repo_dir: /scratch/izar/tlamort/dinov3                     # ← edit this
+dino_weights:  /scratch/izar/tlamort/dinov3/weights/dinov3_vits16_pretrain_lvd1689m.pth   # ← edit this
+
+# To scale up, change both fields to a larger variant, e.g.:
+#   dino_model:   dinov3_vitb16
+#   dino_weights: /scratch/izar/tlamort/dinov3/weights/dinov3_vitb16_[...].pth
+# embed_dim adapts automatically (ViT-S→384, ViT-B→768, ViT-L→1024).
+hist_hidden_dim: 128
+cmd_embed_dim:   32
+fusion_dim:      256
+dropout:         0.1
+
+# ── Optimisation ──────────────────────────────────────────────────────────────
+num_epochs:   60
+lr:           3.0e-4
+weight_decay: 1.0e-4
+grad_clip:    1.0             # max gradient norm; prevents GRU exploding gradients
+
+# ── Scheduler: cosine annealing lr → min_lr over num_epochs ──────────────────
+min_lr: 1.0e-6
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+log_interval: 20              # log training loss every N batches
+
+# ── Resume ────────────────────────────────────────────────────────────────────
+# resume: checkpoints/run_YYYYMMDD_HHMM_epochXXX_adeX.XXXX.pth
