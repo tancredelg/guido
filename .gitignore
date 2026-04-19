@@ -1,6 +1,7 @@
 data/
 checkpoints/
 logs/
+wandb/
 
 #### PYTHON ####
 

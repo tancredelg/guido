@@ -1,0 +1,32 @@
+# Ablation C: swap backbone to ViT-B/16 (768-d, 86M params, all frozen).
+# Everything else identical to baseline.
+# embed_dim adapts automatically — no code changes needed.
+# If this beats baseline → ViT-S features were the bottleneck.
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: ablate-vitb-backbone
+
+data_dir:       data
+checkpoint_dir: checkpoints
+
+dino_model:     dinov3_vitb16
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+hist_hidden_dim: 128
+cmd_embed_dim:   32
+fusion_arch:     concat
+fusion_dim:      256
+dropout:         0.1
+
+num_epochs:   60
+lr:           3.0e-4
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+log_interval: 20
+
+seed: 42
+batch_size:  48    # reduce slightly: ViT-B frozen activations are larger
+num_workers: 4

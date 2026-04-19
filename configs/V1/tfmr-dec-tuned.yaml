@@ -1,0 +1,46 @@
+# Ablation L: transformer decoder with properly tuned hyperparams.
+# The previous transformer decoder run used lr=5e-4 — too high for attention
+# layers which are sensitive to large gradient steps early in training.
+# This run uses lr=2e-4 with a linear warmup over the first 5 epochs,
+# a larger decoder (decoder_d=256 instead of 128), and weighted loss.
+# Also increases dropout in the decoder to 0.1 to regularise the extra capacity.
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: ablate-tfmr-dec-tuned
+
+data_dir:       data
+checkpoint_dir: checkpoints
+
+dino_model:     dinov3_vitb16
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+hist_hidden_dim: 128
+cmd_embed_dim:   32
+fusion_arch:     concat
+fusion_dim:      256
+decoder_arch:    transformer
+decoder_d:       256          # wider than before (128 → 256)
+decoder_layers:  2
+num_heads:       4
+dropout:         0.1
+
+loss:             weighted_huber  # new weighted loss
+loss_near_weight: 0.5
+loss_far_weight:  3.0
+
+seed: 42
+batch_size:   48
+num_workers:  4
+
+num_epochs:   60
+lr:           2.0e-4          # lower lr suited for transformer components
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+log_interval: 20
+
+mirror_p:       0.25
+hist_noise_std: 0.02
+mirror_warmup:  10

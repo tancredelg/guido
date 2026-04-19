@@ -1,0 +1,36 @@
+# Ablation A: add mirror + history-noise augmentation.
+# Everything else identical to baseline.
+# If this beats baseline → augmentation helps and can be kept in all future runs.
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: ablate-data-augm
+
+data_dir:       data
+checkpoint_dir: checkpoints
+
+dino_model:     dinov3_vits16
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vits16_pretrain_lvd1689m.pth
+
+hist_hidden_dim: 128
+cmd_embed_dim:   32
+fusion_arch:     concat
+fusion_dim:      256
+dropout:         0.1
+
+seed: 42
+batch_size:  64
+num_workers: 4
+
+num_epochs:   60
+lr:           3.0e-4
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+log_interval: 20
+
+# Add data augmentation
+mirror_p:       0.5    # horizontal flip + traj mirror + cmd swap
+hist_noise_std: 0.05   # σ=5cm Gaussian noise on history (x,y)
+mirror_warmup:  10     # ramp from 0 -> mirror_p over first 10 epochs

@@ -1,0 +1,37 @@
+# Ablation G: ConvNeXt-Base backbone (89M params, 1024-d features).
+# Completely different inductive bias vs ViT: local convolutions vs global
+# attention. DINOv3 ConvNeXt features are strong for dense/structured tasks.
+# Uses GAP over spatial feature map (handled automatically by _extract_cls).
+# Uses augm2 hyperparams.
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: ablate-convnxt&augm2
+
+data_dir:       data
+checkpoint_dir: checkpoints
+
+dino_model:     dinov3_convnext_base
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_convnext_base_pretrain_lvd1689m-801f2ba9.pth
+
+hist_hidden_dim: 128
+cmd_embed_dim:   32
+fusion_arch:     concat
+fusion_dim:      256
+dropout:         0.05
+
+seed: 42
+batch_size:   48
+num_workers:  4
+
+num_epochs:   60
+lr:           5.0e-4
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+log_interval: 20
+
+mirror_p:       0.25
+hist_noise_std: 0.02
+mirror_warmup:  10

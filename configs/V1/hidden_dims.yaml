@@ -1,0 +1,32 @@
+# Ablation B: wider hidden layers, same backbone and architecture.
+# hist_hidden: 128→256, cmd_embed: 32→64, fusion: 256→512.
+# Trainable params go from ~850k to ~3.5M.
+# If this beats baseline → model was capacity-limited, not data-limited.
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: ablate-hidden-dims
+
+data_dir:       data
+checkpoint_dir: checkpoints
+
+dino_model:     dinov3_vits16
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vits16_pretrain_lvd1689m.pth
+
+hist_hidden_dim: 256   # up from 128
+cmd_embed_dim:   64    # up from 32
+fusion_arch:     concat
+fusion_dim:      512   # up from 256
+dropout:         0.15  # slightly more dropout to match increased capacity
+
+seed: 42
+batch_size:  64
+num_workers: 4
+
+num_epochs:   60
+lr:           3.0e-4
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+log_interval: 20

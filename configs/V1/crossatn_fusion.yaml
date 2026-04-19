@@ -1,0 +1,34 @@
+# Ablation D: cross-attention fusion over patch tokens.
+# Motion query (history+cmd) attends over the 256 spatial patch tokens.
+# Same backbone and dims as baseline, only fusion changes.
+# This was tested before but always with the broken huber delta=0.1 loss.
+# Now testing it properly for the first time.
+
+data_dir:       data
+checkpoint_dir: checkpoints
+
+dino_model:     dinov3_vits16
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vits16_pretrain_lvd1689m.pth
+
+seed: 42
+batch_size:  64
+num_workers: 4
+
+hist_hidden_dim: 128
+cmd_embed_dim:   32
+fusion_arch:     crossattn   # cross-attention fusion instead of concatenation
+fusion_dim:      256
+num_heads:       4
+dropout:         0.1
+
+num_epochs:   60
+lr:           3.0e-4
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+log_interval: 20
+
+wandb_project:  dlav-guido
+wandb_entity:   tancredelg-personal
+wandb_run_name: ablate-crossattn-fusion

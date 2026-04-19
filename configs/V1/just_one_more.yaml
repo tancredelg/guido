@@ -1,0 +1,41 @@
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: just-one-more-2blk
+
+data_dir:       data
+checkpoint_dir: checkpoints
+
+dino_model:     dinov3_vitb16
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+hist_hidden_dim: 256           # slightly higher hidden dim
+cmd_embed_dim:   128           # from 64
+fusion_arch:     crossattn
+fusion_dim:      384
+num_heads:       4
+decoder_arch:    transformer
+decoder_d:       384           # inner dim of transformer decoder
+decoder_layers:  2             # number of cross-attention layers
+dropout:         0.05
+unfreeze_blocks: 2             # unfreeze last 2 ViT-B transformer blocks
+
+loss:             weighted_huber  # new weighted loss
+loss_near_weight: 0.2
+loss_far_weight:  2.0
+
+seed: 42
+batch_size:   64
+num_workers:  4
+
+num_epochs:   200             # more epochs!
+lr:           1.0e-3          # head lr (increased)
+backbone_lr:  3.0e-5          # backbone blocks lr
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+log_interval: 20
+
+mirror_p:       0.2
+hist_noise_std: 0.02
+mirror_warmup:  10

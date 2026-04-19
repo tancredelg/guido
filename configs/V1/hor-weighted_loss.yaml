@@ -1,0 +1,44 @@
+# Ablation J: horizon-weighted Huber loss.
+# Near-horizon steps (easy, ~0.25 ADE) get weight 0.5.
+# Far-horizon steps (hard, ~4.0 ADE) get weight 3.0.
+# This is a 6× relative rebalancing — forces the optimiser to actually
+# work on the part of the trajectory that dominates the leaderboard score.
+# Everything else identical to current best (vitb&augm2 MLP decoder).
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: ablate-hor-weighted-loss
+
+data_dir:       data
+checkpoint_dir: checkpoints
+
+dino_model:     dinov3_vitb16
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+hist_hidden_dim: 128
+cmd_embed_dim:   32
+fusion_arch:     concat
+fusion_dim:      256
+decoder_arch:    mlp
+dropout:         0.05
+
+loss:             weighted_huber  # new weighted loss
+loss_near_weight: 0.5
+loss_far_weight:  3.0
+loss_delta:       1.0
+
+seed: 42
+batch_size:   48
+num_workers:  4
+
+num_epochs:   60
+lr:           5.0e-4
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+log_interval: 20
+
+mirror_p:       0.25
+hist_noise_std: 0.02
+mirror_warmup:  10

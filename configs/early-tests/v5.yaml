@@ -1,0 +1,63 @@
+# ── Guido v5 config ───────────────────────────────────────────────────────────
+# Goal: reproduce v1 dataset behaviour exactly while keeping the v3/v4
+# architecture improvements, to confirm the dataset changes broke things.
+#
+# v1 (vits14, abs, huber, colour-jitter only):   ADE 1.96  ← reference
+# v2/v3/v4 (new augmentations):                  ADE ~2.1–2.4
+# v5 (vits+, abs, mse, colour-jitter only):      target < 1.9
+#
+# ALL augmentation added in v2 is disabled here:
+#   mirror_p: 0.0        → no horizontal flip
+#   hist_noise_std: 0.0  → no coordinate noise
+#   hist_dropout_p: 0.0  → no history step dropout
+# Colour jitter is kept (it was in v1 and is unambiguously safe).
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+data_dir:       data
+checkpoint_dir: checkpoints
+
+# ── DINOv3 backbone ───────────────────────────────────────────────────────────
+dino_model:    dinov3_vits16plus
+dino_repo_dir: /scratch/izar/tlamort/dinov3
+dino_weights:  /scratch/izar/tlamort/dinov3/weights/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
+
+# ── Reproducibility ───────────────────────────────────────────────────────────
+seed: 42
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+batch_size:    64
+num_workers:   4
+delta_future:  false
+
+# Augmentation — all v2 additions disabled
+mirror_p:          0.0    # no horizontal flip
+hist_noise_std:    0.0    # no history coordinate noise
+hist_dropout_p:    0.0    # no history step dropout
+# mirror_warmup_epochs is irrelevant when mirror_p=0, kept for completeness
+mirror_warmup_epochs: 10
+
+# ── Architecture ──────────────────────────────────────────────────────────────
+use_patch_tokens: false
+hist_hidden_dim:  128
+cmd_embed_dim:    32
+fusion_dim:       256
+num_heads:        4
+dropout:          0.1
+
+# ── Loss ──────────────────────────────────────────────────────────────────────
+loss: mse
+
+# ── Optimisation ──────────────────────────────────────────────────────────────
+num_epochs:   60
+lr:           3.0e-4
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+log_interval: 20
+
+# ── W&B ───────────────────────────────────────────────────────────────────────
+wandb_project:  guido-dlav
+wandb_entity:   tancredelg-personal
+wandb_run_name: v5-vitsplus-cls-abs-mse-noaug

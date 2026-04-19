@@ -1,0 +1,39 @@
+# Ablation H: transposed-conv decoder.
+# 12 sparse anchor waypoints → ConvTranspose1d(stride=5) → 60 steps.
+# Enforces temporal smoothness structurally — adjacent timesteps are physically
+# related by the continuous upsampling, not predicted independently.
+# Expected to reduce ade_far which dominates the aggregate ADE.
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: ablate-vitb&augm2&conv-dec
+
+data_dir:       data
+checkpoint_dir: checkpoints
+
+dino_model:     dinov3_vitb16
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+hist_hidden_dim: 128
+cmd_embed_dim:   32
+fusion_arch:     concat
+fusion_dim:      256
+decoder_arch:    conv     # the only change vs vitb&augm2 baseline
+n_anchors:       12       # 12 anchors * stride 5 = 60 timesteps exactly
+dropout:         0.05
+
+seed: 42
+batch_size:   48
+num_workers:  4
+
+num_epochs:   60
+lr:           5.0e-4
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+log_interval: 20
+
+mirror_p:       0.25
+hist_noise_std: 0.02
+mirror_warmup:  10

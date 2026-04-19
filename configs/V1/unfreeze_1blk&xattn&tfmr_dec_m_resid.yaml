@@ -1,0 +1,42 @@
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: ablate-unfreeze-1blk&xattn&tfmr-dec-m-resid
+
+data_dir:       data
+checkpoint_dir: checkpoints
+
+dino_model:     dinov3_vitb16
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+hist_hidden_dim: 448           # from 256
+cmd_embed_dim:   256           # from 128
+fusion_arch:     crossattn
+fusion_dim:      448           # from 384
+num_heads:       8
+decoder_arch:    transformer
+decoder_d:       448           # from 256
+decoder_layers:  2             # number of cross-attention layers
+residual_baseline: true
+dropout:         0.05
+unfreeze_blocks: 1             # unfreeze last 1 ViT-B transformer block
+
+loss:             weighted_huber  # new weighted loss
+loss_near_weight: 0.2
+loss_far_weight:  4
+
+seed: 42
+batch_size:   64
+num_workers:  8
+
+num_epochs:   150             # more epochs!
+lr:           7.0e-4          # head lr (increased)
+backbone_lr:  5.0e-5          # backbone blocks lr
+weight_decay: 5.0e-5
+grad_clip:    1.0
+min_lr:       1.0e-6
+log_interval: 20
+
+mirror_p:       0.2
+hist_noise_std: 0.02
+mirror_warmup:  10

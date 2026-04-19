@@ -1,0 +1,50 @@
+# ── Paths ─────────────────────────────────────────────────────────────────────
+data_dir:       data
+checkpoint_dir: checkpoints
+
+# ── DINOv3 backbone ───────────────────────────────────────────────────────────
+# ViT-S+/16: 29M params, embed_dim=480. Slightly richer than ViT-S (384)
+# but much lighter than ViT-B (768). Good middle ground given 5k samples.
+dino_model:    dinov3_vits16plus
+dino_repo_dir: /scratch/izar/tlamort/dinov3
+dino_weights:  /scratch/izar/tlamort/dinov3/weights/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
+ 
+# ── Reproducibility ───────────────────────────────────────────────────────────
+seed: 42
+ 
+# ── Data ──────────────────────────────────────────────────────────────────────
+batch_size:   64
+num_workers:  4
+delta_future: true
+mirror_warmup_epochs: 10
+ 
+# ── Architecture ──────────────────────────────────────────────────────────────
+# Leaner dims — v2 had hist_hidden=256, fusion=256 which was too expressive
+# relative to the amount of training signal available.
+use_patch_tokens: false   # CLS-only: proven to work, cross-attn shown not to help
+hist_hidden_dim:  128
+cmd_embed_dim:    32
+fusion_dim:       256
+num_heads:        4       # unused when use_patch_tokens=false
+dropout:          0.1
+ 
+# ── Loss ──────────────────────────────────────────────────────────────────────
+loss: mse   # switch from huber to MSE — no threshold to mis-calibrate for deltas
+ 
+# ── Optimisation ──────────────────────────────────────────────────────────────
+num_epochs:   60
+lr:           3.0e-4
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+ 
+# ── Logging ───────────────────────────────────────────────────────────────────
+log_interval: 20
+
+# ── W&B ───────────────────────────────────────────────────────────────────────
+wandb_project:  guido-dlav
+wandb_entity:   tancredelg-personal
+wandb_run_name: v3-vits-plus-cls-delta-mse
+ 
+# ── Resume ────────────────────────────────────────────────────────────────────
+# resume: checkpoints/run_YYYYMMDD_HHMM_epochXXX_adeX.XXXX.pth

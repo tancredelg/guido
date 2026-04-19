@@ -1,0 +1,49 @@
+# Ablation K: unfreeze last 2 ViT-B blocks for fine-tuning.
+# The frozen CLS token has general vision features, not road-geometry features.
+# The model's far-horizon errors (ade_far ~4.0) are consistent with the backbone
+# not encoding "where does the road go after this turn" — information that
+# requires driving-domain fine-tuning to extract.
+#
+# Last 2 blocks of ViT-B/16 = ~14M additional trainable params.
+# Backbone blocks get backbone_lr=2.5e-5 (20× lower than head lr=5e-4)
+# to avoid catastrophic forgetting of general vision features.
+# Weighted loss is also on — attacking the bottleneck from both sides.
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: ablate-unfreeze-2blk&mlp-dec
+
+data_dir:       data
+checkpoint_dir: checkpoints
+
+dino_model:     dinov3_vitb16
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+hist_hidden_dim: 128
+cmd_embed_dim:   32
+fusion_arch:     concat
+fusion_dim:      256
+decoder_arch:    mlp
+dropout:         0.1          # slightly higher dropout to regularise the extra capacity
+unfreeze_blocks: 2            # unfreeze last 2 ViT-B transformer blocks
+
+loss:             weighted_huber
+loss_near_weight: 0.5
+loss_far_weight:  3.0
+
+seed: 42
+batch_size:   32              # reduced: 14M extra backbone params need more memory
+num_workers:  4
+
+num_epochs:   60
+lr:           5.0e-4          # head lr
+backbone_lr:  2.5e-5          # backbone blocks lr (20× lower)
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+log_interval: 20
+
+mirror_p:       0.25
+hist_noise_std: 0.02
+mirror_warmup:  10

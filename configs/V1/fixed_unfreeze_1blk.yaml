@@ -1,0 +1,50 @@
+# Re-run of the 1.7789-ADE config with the backbone unfreeze bug fixed.
+# Previously torch.no_grad() was wrapping the backbone call unconditionally,
+# meaning unfrozen blocks received zero gradient — identical to frozen.
+# This is the first run where the backbone blocks are actually fine-tuned.
+#
+# Config is identical to unfreeze_1blk&xattn&tfmr_dec_2l (the 1.7789 run)
+# except backbone_lr is slightly lower (3e-5 vs 5e-5) since the blocks
+# will now actually receive gradients and we want to avoid overshooting
+# the pretrained features with too large a step.
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: fix-unfreeze-1blk-xattn-tfmr
+
+data_dir:       data
+checkpoint_dir: checkpoints
+
+dino_model:     dinov3_vitb16
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+hist_hidden_dim: 256
+cmd_embed_dim:   128
+fusion_arch:     crossattn
+fusion_dim:      384
+num_heads:       4
+decoder_arch:    transformer
+decoder_d:       256
+decoder_layers:  2
+dropout:         0.05
+unfreeze_blocks: 1
+
+loss:             weighted_huber
+loss_near_weight: 0.2
+loss_far_weight:  2.0
+
+seed: 42
+batch_size:   64
+num_workers:  4
+num_epochs:   80
+lr:           1.0e-3
+backbone_lr:  3.0e-5      # lower than before since gradients now actually flow
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+log_interval: 20
+
+mirror_p:       0.2
+hist_noise_std: 0.02
+mirror_warmup:  10

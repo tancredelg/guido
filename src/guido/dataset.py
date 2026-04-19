@@ -6,71 +6,69 @@ import torch
 from torch.utils.data import Dataset
 import torchvision.transforms.v2 as T
 
-# ── Constants ──────────────────────────────────────────────────────────────────
-
 COMMAND_MAP = {"forward": 0, "left": 1, "right": 2}
-
-# DINOv2 was trained with standard ImageNet normalisation
+COMMAND_MIRROR = {0: 0, 1: 2, 2: 1}
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
-
-# DINOv3 patch size is 16 → input must be a multiple of 16.
-# 256 × 256 is the recommended default per the DINOv3 README transform.
 DINO_INPUT_SIZE = 256
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-
 def _sorted_pkl_files(directory: str) -> list[str]:
-    """Return .pkl paths in a directory sorted numerically by filename stem."""
     files = [f for f in os.listdir(directory) if f.endswith(".pkl")]
     files.sort(key=lambda f: int(os.path.splitext(f)[0]))
     return [os.path.join(directory, f) for f in files]
 
 
-def _encode_history(history: np.ndarray) -> torch.Tensor:
-    """
-    Convert raw (21, 3) history [x, y, heading_rad] into (21, 4)
-    [x, y, sin(heading), cos(heading)].
-
-    Representing heading as (sin, cos) avoids the discontinuity at ±π and
-    keeps all features in a comparable numerical range.
-    """
-    xy = history[:, :2]  # (21, 2)
-    heading = history[:, 2]  # (21,)
-    encoded = np.stack([xy[:, 0], xy[:, 1], np.sin(heading), np.cos(heading)], axis=1)  # (21, 4)
-    return torch.from_numpy(encoded).float()
+def _encode_history(history: np.ndarray) -> np.ndarray:
+    """(21,3) [x,y,heading] → (21,4) [x, y, sin(h), cos(h)]"""
+    xy, h = history[:, :2], history[:, 2]
+    return np.stack([xy[:, 0], xy[:, 1], np.sin(h), np.cos(h)], axis=1).astype(np.float32)
 
 
-# ── Dataset ────────────────────────────────────────────────────────────────────
+def _mirror(camera, history, future, command):
+    """Horizontal flip + x-axis mirror of trajectories + left↔right command."""
+    camera = T.functional.horizontal_flip(camera)
+    h = history.copy()
+    h[:, 0] *= -1
+    h[:, 2] *= -1
+    f = None if future is None else (lambda c: (c.__setitem__(slice(None), c.copy()), c)[1])(future.copy())
+    if future is not None:
+        f = future.copy()
+        f[:, 0] *= -1
+    return camera, h, f, COMMAND_MIRROR[command]
 
 
 class DrivingDataset(Dataset):
     """
-    Loads pre-processed nuPlan pickle files and returns dicts ready for the
-    DrivingPlanner model.
+    Loads nuPlan .pkl files.
 
-    Each sample dict contains:
-        camera   : FloatTensor (3, 224, 224) – normalised, DINOv2-ready
-        history  : FloatTensor (21, 4)       – [x, y, sin(h), cos(h)]
-        command  : LongTensor  ()            – 0=forward, 1=left, 2=right
-        future   : FloatTensor (60, 3)       – [x, y, heading] (train/val only)
+    Augmentations (training only, all off by default = baseline behaviour):
+      mirror_p       : prob of horizontal flip + trajectory mirror + cmd swap.
+      hist_noise_std : σ of Gaussian noise added to history (x, y) in metres.
 
-    Args:
-        file_list : list of absolute paths to .pkl files.
-        augment   : if True, apply colour jitter to the camera image.
-                    Should only be True for the training split.
-        test      : if True, skip loading 'future' (unavailable in test set).
+    Both default to 0.0 so the baseline config needs no changes.
+    set_epoch(epoch) ramps mirror_p linearly over warmup_epochs to avoid
+    confusing an untrained model.
     """
 
-    def __init__(self, file_list: list[str], augment: bool = False, test: bool = False):
+    def __init__(
+        self,
+        file_list: list[str],
+        *,
+        augment: bool = False,
+        test: bool = False,
+        mirror_p: float = 0.0,
+        hist_noise_std: float = 0.0,
+        mirror_warmup: int = 10,
+    ):
         self.samples = file_list
         self.test = test
+        self.augment = augment
+        self.mirror_p = mirror_p
+        self.hist_noise_std = hist_noise_std
+        self.mirror_warmup = mirror_warmup
+        self._eff_mirror_p = 0.0  # updated by set_epoch()
 
-        # Colour jitter is safe because it does not alter the trajectory.
-        # We deliberately avoid geometric augmentations (flip, crop) since they
-        # would require mirroring/offsetting the trajectory labels.
         if augment:
             self.transform = T.Compose(
                 [
@@ -89,6 +87,11 @@ class DrivingDataset(Dataset):
                 ]
             )
 
+    def set_epoch(self, epoch: int) -> None:
+        """Ramp mirror probability 0 → mirror_p over mirror_warmup epochs."""
+        ramp = min(1.0, epoch / max(self.mirror_warmup, 1))
+        self._eff_mirror_p = self.mirror_p * ramp
+
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -96,33 +99,50 @@ class DrivingDataset(Dataset):
         with open(self.samples[idx], "rb") as f:
             data = pickle.load(f)
 
-        # Camera: (H, W, 3) uint8 → (3, H, W) then resize + normalise
-        camera = torch.from_numpy(data["camera"]).permute(2, 0, 1)  # (3, 200, 300)
-        camera = self.transform(camera)  # (3, 224, 224)
+        command = COMMAND_MAP[data["driving_command"]]
+        history = _encode_history(data["sdc_history_feature"])  # (21,4) np.float32
+        future = None if self.test else data["sdc_future_feature"].astype(np.float32)
 
-        history = _encode_history(data["sdc_history_feature"])  # (21, 4)
-        command = torch.tensor(COMMAND_MAP[data["driving_command"]], dtype=torch.long)
+        camera = torch.from_numpy(data["camera"]).permute(2, 0, 1)  # (3,H,W) uint8
+        camera = self.transform(camera)  # (3,256,256) float
 
-        sample = {"camera": camera, "history": history, "command": command}
+        if self.augment:
+            if self.mirror_p > 0 and torch.rand(1).item() < self._eff_mirror_p:
+                camera, history, future, command = _mirror(camera, history, future, command)
+            if self.hist_noise_std > 0:
+                history[:, :2] += np.random.normal(0, self.hist_noise_std, (21, 2)).astype(np.float32)
 
-        if not self.test:
-            sample["future"] = torch.from_numpy(data["sdc_future_feature"]).float()  # (60, 3)
-
+        sample = {
+            "camera": camera,
+            "history": torch.from_numpy(history),
+            "command": torch.tensor(command, dtype=torch.long),
+        }
+        if future is not None:
+            sample["future"] = torch.from_numpy(future)
         return sample
 
 
-# ── Convenience constructors ───────────────────────────────────────────────────
-
-
-def make_datasets(data_dir: str) -> tuple[DrivingDataset, DrivingDataset]:
-    """Return (train_dataset, val_dataset) from a root data directory."""
-    train_ds = DrivingDataset(_sorted_pkl_files(os.path.join(data_dir, "train")), augment=True)
-    val_ds = DrivingDataset(_sorted_pkl_files(os.path.join(data_dir, "val")), augment=False)
+def make_datasets(
+    data_dir: str,
+    mirror_p: float = 0.0,
+    hist_noise_std: float = 0.0,
+    mirror_warmup: int = 10,
+):
+    train_ds = DrivingDataset(
+        _sorted_pkl_files(os.path.join(data_dir, "train")),
+        augment=True,
+        mirror_p=mirror_p,
+        hist_noise_std=hist_noise_std,
+        mirror_warmup=mirror_warmup,
+    )
+    val_ds = DrivingDataset(
+        _sorted_pkl_files(os.path.join(data_dir, "val")),
+        augment=False,
+    )
     return train_ds, val_ds
 
 
 def make_test_dataset(data_dir: str) -> DrivingDataset:
-    """Return the test dataset (no future labels)."""
     return DrivingDataset(
         _sorted_pkl_files(os.path.join(data_dir, "test_public")),
         augment=False,

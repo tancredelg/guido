@@ -1,0 +1,56 @@
+# ── Guido v4 config ───────────────────────────────────────────────────────────
+# Ablation: revert delta_future to false (absolute position prediction, like v1).
+# Everything else stays identical to v3 so the comparison is clean.
+#
+# v1 (CLS + abs + huber):          ADE 1.96   ← our reference
+# v2 (xattn + Δ + huber):          ADE 2.08
+# v3 (CLS + Δ + mse, vits+):       ADE ~2.25  ← delta prediction is the culprit?
+# v4 (CLS + abs + mse, vits+):     target < 1.9
+#
+# If v4 < v1 → absolute prediction + mse + vits+ + new augmentation is the recipe.
+# If v4 ≈ v1 → augmentation isn't helping either; revisit.
+# If v4 > v1 → something else changed; diff carefully against baseline.yaml.
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+data_dir:       data
+checkpoint_dir: checkpoints
+
+# ── DINOv3 backbone ───────────────────────────────────────────────────────────
+dino_model:    dinov3_vits16plus
+dino_repo_dir: /scratch/izar/tlamort/dinov3
+dino_weights:  /scratch/izar/tlamort/dinov3/weights/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
+
+# ── Reproducibility ───────────────────────────────────────────────────────────
+seed: 42
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+batch_size:           64
+num_workers:          4
+delta_future:         false     # ← THE ONLY CHANGE vs v3
+mirror_warmup_epochs: 10
+
+# ── Architecture ──────────────────────────────────────────────────────────────
+use_patch_tokens: false
+hist_hidden_dim:  128
+cmd_embed_dim:    32
+fusion_dim:       256
+num_heads:        4
+dropout:          0.1
+
+# ── Loss ──────────────────────────────────────────────────────────────────────
+loss: mse
+
+# ── Optimisation ──────────────────────────────────────────────────────────────
+num_epochs:   60
+lr:           3.0e-4
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+log_interval: 20
+
+# ── W&B ───────────────────────────────────────────────────────────────────────
+wandb_project:  guido-dlav
+wandb_entity:   tancredelg-personal
+wandb_run_name: v4-vitsplus-cls-abs-mse

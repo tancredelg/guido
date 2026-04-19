@@ -1,0 +1,52 @@
+# ── Guido v2 config ───────────────────────────────────────────────────────────
+# Key upgrades vs baseline:
+#   • DINOv3 ViT-B/16 backbone (768-d, richer features)
+#   • Cross-attention fusion over patch tokens (use_patch_tokens: true)
+#   • Delta future prediction (delta_future: true) → better FDE
+#   • Mirror + history noise/dropout augmentation (in dataset.py)
+#   • W&B logging to tancredelg-personal
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+data_dir:       data
+checkpoint_dir: checkpoints
+
+# ── DINOv3 backbone ───────────────────────────────────────────────────────────
+# Swap to vitb16 or vitl16 here only — everything else adapts automatically.
+dino_model:    dinov3_vitb16
+dino_repo_dir: /scratch/izar/tlamort/dinov3
+dino_weights:  /scratch/izar/tlamort/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+# ── Reproducibility ───────────────────────────────────────────────────────────
+seed: 42
+ 
+# ── Data ──────────────────────────────────────────────────────────────────────
+batch_size:    48      # ViT-B frozen → activations are bigger; reduce if OOM
+num_workers:   4
+delta_future:  true                # predict Δ(x,y); cumsum recovers trajectory
+mirror_warmup_epochs: 10           # ramp mirror prob 0%→50% over first 10 epochs
+ 
+# ── Architecture ──────────────────────────────────────────────────────────────
+hist_hidden_dim:  256   # upscaled to match richer image features
+cmd_embed_dim:    64
+fusion_dim:       256
+num_heads:        4     # heads for cross-attention
+dropout:          0.1
+use_patch_tokens: true  # false → falls back to CLS-only (v1 ablation)
+ 
+# ── Optimisation ──────────────────────────────────────────────────────────────
+num_epochs:   60
+lr:           2.0e-4    # slightly lower for the larger backbone's projections
+weight_decay: 1.0e-4
+grad_clip:    1.0
+min_lr:       1.0e-6
+ 
+# ── Logging ───────────────────────────────────────────────────────────────────
+log_interval: 20
+ 
+# ── W&B ───────────────────────────────────────────────────────────────────────
+wandb_project:  dlav-guido
+wandb_entity:   tancredelg-personal
+wandb_run_name: v2-vitb-crossattn-delta
+ 
+# ── Resume ────────────────────────────────────────────────────────────────────
+# resume: checkpoints/run_YYYYMMDD_HHMM_epochXXX_adeX.XXXX.pth
