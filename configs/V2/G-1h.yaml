@@ -1,0 +1,61 @@
+# ── DrivingPlannerV2 baseline config ──────────────────────────────────────────
+# Run with: python src/train_v2.py --config configs/v2_baseline.yaml
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: v2-g-1h+
+
+data_dir:       data
+checkpoint_dir: checkpoints
+
+dino_model:     dinov3_vitb16
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+seed: 42
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+# Smaller batch = more gradient steps per epoch = more signal per epoch.
+# This matters with 5k samples: batch=32 gives 156 steps/epoch vs 78 at bs=64.
+batch_size:   32
+num_workers:  4
+
+# Weighted sampler: oversample long/hard trajectories to counteract the
+# imbalance where easy forward-cruising samples dominate uniform batches.
+weighted_sampler: false  # Not for K=1!
+
+# Mild augmentation only — heavy augmentation consistently hurt in ablations
+mirror_p:       0.1      # % of samples to mirror (left-right flip)
+hist_noise_std: 0.02     # Gaussian noise stddev for the history (applied after normalization)
+mirror_warmup:  5        # number of epochs to warm up the mirror augmentation (lerp from 0 to mirror_p)
+
+# ── Architecture ──────────────────────────────────────────────────────────────
+unfreeze_blocks:   2     # number of ViT backbone blocks to unfreeze for fine-tuning (from the end)
+d:                 448   # inner model (hidden) dim
+num_heads:         4     # number of attention heads (for fusion xattn)
+hist_layers:       3     # number of layers in the history transformer encoder
+dec_layers:        3     # number of layers in the trajectory transformer decoder
+K:                 1     # number of mixture trajectory heads
+dropout:           0.08  # dropout regularisation throughout the model
+cmd_embed_dim:     256   # embedding dim for the driving command input
+
+# ── Loss ──────────────────────────────────────────────────────────────────────
+loss_near_weight:      0.5   # weight for loss at start of horizon/trajectory
+loss_far_weight:       2.0   # weight for loss at end of horizon/trajectory
+smoothness_weight:     0.08  # weight for the smoothness loss term — encourages smoother trajectories
+# vvv IRRELEVANT FOR L-1h (single pred head) vvv
+# wta_weight:            0.75  # amount of gradient to route through the Winner-Takes-All head (vs auxiliary heads) — encourages specialization while still training all heads
+# router_weight:         0.5   # weight for the router CE loss = how much to encourage good routing
+# router_warmpup_epochs: 20    # how long to keep router frozen for heads to specialize before learning to route
+
+# ── Optimisation ──────────────────────────────────────────────────────────────
+num_epochs:    250       # num of training epochs (1 epoch = 1 full pass through the dataset)
+warmup_epochs: 5         # linear warmup before cosine — helps transformers
+
+# Head lr: slightly lower than old V1 since transformers are lr-sensitive
+lr:           5.0e-4     # learning rate for the newly initialized head parameters
+backbone_lr:  1.5e-5     # learning rate for the (pre-trained) backbone fine-tuning
+weight_decay: 5.0e-5     # how much to weight decay (L2 regularization) the model parameters — helps prevent overfitting
+grad_clip:    1.0        # max gradient norm for clipping (helps stabilise training)
+min_lr:       1.0e-5     # minimum learning rate for cosine annealing (after warmup)
+log_interval: 20         # how often to log training metrics (in steps)
