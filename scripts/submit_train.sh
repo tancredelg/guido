@@ -32,7 +32,7 @@ SCRATCH=/scratch/izar/$USER
 # Data lives on scratch for fast I/O; override the config path via CLI flag.
 DATA_DIR=$SCRATCH/CIVIL-459/guido/data
 
-CFG='configs/V2/L-3h.yaml'
+CFG='configs/V2/c2f-4h.yaml'
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 echo "Job $SLURM_JOB_ID starting on $(hostname) at $(date)"

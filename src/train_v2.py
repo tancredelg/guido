@@ -22,14 +22,14 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 sys.path.insert(0, str(Path(__file__).parent))
 
 from guido.dataset import make_datasets, make_test_dataset
+from guido.losses_v2 import ade, best_of_k_ade, fde, winner_takes_all_loss
 from guido.model_v2 import DrivingPlannerV2
-from guido.losses_v2 import winner_takes_all_loss, ade, fde, best_of_k_ade
 from guido.utils import (
-    seed_everything,
-    save_checkpoint,
-    load_checkpoint,
-    checkpoint_path,
     build_submission_csv,
+    checkpoint_path,
+    load_checkpoint,
+    save_checkpoint,
+    seed_everything,
 )
 
 logging.basicConfig(
@@ -136,33 +136,35 @@ def validate(model, loader, device, cfg):
         command = batch["command"].to(device)
         future = batch["future"].to(device)
 
-        preds, router_logits = model(camera, history, command)
+        fine_preds, coarse_preds, router_logits = model(camera, history, command)
 
         loss, _ = winner_takes_all_loss(
-            preds,
+            fine_preds,
+            coarse_preds,
             router_logits,
             future,
             smoothness_weight=sw,
+            coarse_weight=cfg.get("coarse_weight", 0.3),
             wta_weight=cfg.get("wta_weight", 0.8),
             router_weight=cfg.get("router_weight", 0.5),
             near_weight=cfg.get("loss_near_weight", 0.5),
             far_weight=cfg.get("loss_far_weight", 2.0),
-            router_active=True,  # always active during validation reporting
+            router_active=True,
         )
         total_loss += loss.item()
 
-        # Head selection via trained router — same as inference, no oracle
-        stacked = torch.stack(preds, dim=0)  # (K, B, 60, 2)
+        # Head selection via trained router
+        stacked = torch.stack(fine_preds, dim=0)
         gt_xy = future[..., :2]
-        best_k = router_logits.argmax(dim=-1)  # (B,)
+        best_k = router_logits.argmax(dim=-1)
         idx_exp = best_k.view(1, -1, 1, 1).expand(1, -1, 60, 2)
-        best_pred = stacked.gather(0, idx_exp).squeeze(0)  # (B, 60, 2)
+        best_pred = stacked.gather(0, idx_exp).squeeze(0)
 
         per_step = torch.norm(best_pred - gt_xy, p=2, dim=-1)  # (B, 60)
 
         ade_vals.append(per_step.mean().item())
         fde_vals.append(per_step[:, -1].mean().item())
-        bofk_vals.append(best_of_k_ade(preds, future).item())
+        bofk_vals.append(best_of_k_ade(fine_preds, future).item())
 
         for c in range(3):
             m = command == c
@@ -260,6 +262,7 @@ def train(cfg: dict, use_wandb: bool) -> None:
         hist_layers=cfg.get("hist_layers", 2),
         dec_layers=cfg.get("dec_layers", 2),
         K=cfg.get("K", 3),
+        n_coarse=cfg.get("n_coarse", 6),
         dropout=cfg.get("dropout", 0.05),
         smoothness_weight=cfg.get("smoothness_weight", 0.1),
         cmd_embed_dim=cfg.get("cmd_embed_dim", 64),
@@ -269,7 +272,6 @@ def train(cfg: dict, use_wandb: bool) -> None:
     # ── Optimiser: separate lr for backbone ───────────────────────────────
     base_lr = cfg.get("lr", 5e-4)
     backbone_lr = cfg.get("backbone_lr", base_lr / 20)
-    router_lr = cfg.get("router_lr", base_lr * 10.0)  # Much higher LR for late-starting router
     wd = cfg.get("weight_decay", 1e-4)
 
     def no_wd(n):
@@ -278,23 +280,12 @@ def train(cfg: dict, use_wandb: bool) -> None:
     head_decay = [
         p
         for n, p in model.named_parameters()
-        if p.requires_grad
-        and not n.startswith("backbone.")
-        and not n.startswith("router.")
-        and not no_wd(n)
+        if p.requires_grad and not n.startswith("backbone.") and not no_wd(n)
     ]
     head_no_decay = [
         p
         for n, p in model.named_parameters()
-        if p.requires_grad and not n.startswith("backbone.") and not n.startswith("router.") and no_wd(n)
-    ]
-    router_decay = [
-        p
-        for n, p in model.named_parameters()
-        if p.requires_grad and n.startswith("router.") and not no_wd(n)
-    ]
-    router_no_decay = [
-        p for n, p in model.named_parameters() if p.requires_grad and n.startswith("router.") and no_wd(n)
+        if p.requires_grad and not n.startswith("backbone.") and no_wd(n)
     ]
     bb_decay = [
         p
@@ -308,15 +299,13 @@ def train(cfg: dict, use_wandb: bool) -> None:
     groups = [
         {"params": head_decay, "lr": base_lr, "weight_decay": wd},
         {"params": head_no_decay, "lr": base_lr, "weight_decay": 0.0},
-        {"params": router_decay, "lr": router_lr, "weight_decay": wd},
-        {"params": router_no_decay, "lr": router_lr, "weight_decay": 0.0},
     ]
     if bb_decay or bb_no_decay:
         groups += [
             {"params": bb_decay, "lr": backbone_lr, "weight_decay": wd},
             {"params": bb_no_decay, "lr": backbone_lr, "weight_decay": 0.0},
         ]
-        log.info("Backbone lr %.2e  Head lr %.2e  Router lr %.2e", backbone_lr, base_lr, router_lr)
+        log.info("Backbone lr %.2e  Head lr %.2e", backbone_lr, base_lr)
 
     optimizer = optim.AdamW(groups)
 
@@ -371,22 +360,7 @@ def train(cfg: dict, use_wandb: bool) -> None:
             p.requires_grad = not router_frozen
         if epoch == router_warmup_epochs and K > 1:
             log.info("Epoch %d: router unfrozen — CE loss now active", epoch + 1)
-
-        # Schedule router weight: ramp up linearly to 3x after warmup
-        # As the trajectory losses decay, we need to artificially boost the router loss
-        # so it maintains strong gradient signals.
-        base_router_weight = cfg.get("router_weight", 0.5)
-        if not router_frozen and K > 1:
-            progress = (epoch - router_warmup_epochs) / max(1, num_epochs - router_warmup_epochs)
-            curr_router_weight = base_router_weight  # * (1.0 + 2.0 * progress)
-        else:
-            curr_router_weight = base_router_weight
-
-        wandb_log(
-            run,
-            epoch,
-            {"train/router_active": int(not router_frozen), "train/router_weight": curr_router_weight},
-        )
+        wandb_log(run, epoch, {"train/router_active": int(not router_frozen)})
         train_ds.set_epoch(epoch)
         model.train()
         train_loss = 0.0
@@ -399,14 +373,16 @@ def train(cfg: dict, use_wandb: bool) -> None:
             future = batch["future"].to(device)
 
             optimizer.zero_grad(set_to_none=True)
-            preds, router_logits = model(camera, history, command)
+            fine_preds, coarse_preds, router_logits = model(camera, history, command)
             loss, winner = winner_takes_all_loss(
-                preds,
+                fine_preds,
+                coarse_preds,
                 router_logits,
                 future,
                 smoothness_weight=sw,
+                coarse_weight=cfg.get("coarse_weight", 0.3),
                 wta_weight=cfg.get("wta_weight", 0.8),
-                router_weight=curr_router_weight,
+                router_weight=cfg.get("router_weight", 0.5),
                 near_weight=cfg.get("loss_near_weight", 0.5),
                 far_weight=cfg.get("loss_far_weight", 2.0),
                 router_active=not router_frozen,

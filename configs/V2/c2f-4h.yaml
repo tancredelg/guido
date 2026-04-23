@@ -1,0 +1,50 @@
+# V2 Coarse-to-Fine — 4 heads
+# Key change: router now sees coarse trajectory sketches from each head,
+# not just input features. Should close most of the bofk_ade gap.
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: v2-c2f-4h
+
+data_dir:       data
+checkpoint_dir: checkpoints
+dino_model:     dinov3_vitb16
+dino_repo_dir:  /scratch/izar/tlamort/dinov3
+dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+seed: 42
+batch_size:       32
+num_workers:      4
+
+weighted_sampler: true
+mirror_p:         0.1
+hist_noise_std:   0.02
+mirror_warmup:    5
+
+unfreeze_blocks:  1
+d:                384
+num_heads:        4
+hist_layers:      3
+dec_layers:       3
+K:                4
+n_coarse:         6       # anchor waypoints per head for router conditioning
+dropout:          0.05
+cmd_embed_dim:    256
+
+loss_near_weight:     0.5
+loss_far_weight:      2.0
+smoothness_weight:    0.10
+coarse_weight:        0.3  # auxiliary loss weight for coarse head supervision
+wta_weight:           0.8
+router_weight:        0.8
+router_warmup_epochs: 120 
+
+num_epochs:    250
+warmup_epochs: 5
+
+lr:            3.0e-4
+backbone_lr:   1.5e-5
+weight_decay:  1.0e-4
+grad_clip:     1.0
+min_lr:        1.0e-6
+log_interval:  20

@@ -24,7 +24,6 @@ as the test split, so val ADE is the honest estimate of Kaggle score.
 """
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
@@ -36,9 +35,11 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).parent))
 
 from guido.dataset import make_datasets, make_test_dataset
+from guido.losses_v2 import ade as compute_ade
+from guido.losses_v2 import best_of_k_ade
+from guido.losses_v2 import fde as compute_fde
 from guido.model_v2 import DrivingPlannerV2
-from guido.losses_v2 import ade as compute_ade, fde as compute_fde, best_of_k_ade
-from guido.utils import seed_everything, build_submission_csv
+from guido.utils import build_submission_csv, seed_everything
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -79,12 +80,9 @@ def load_model(checkpoint_path: str, device: torch.device) -> DrivingPlannerV2:
             len(missing),
             len(unexpected),
         )
-    log.info("Model loaded with config:\n%s", json.dumps(cfg, indent=2))
     model.to(device).eval()
     log.info(
-        "Loaded checkpoint: epoch %d  val ADE %.4f",
-        ckpt.get("epoch", -1),
-        ckpt.get("val_ade", float("nan")),
+        "Loaded checkpoint: epoch %d  val ADE %.4f", ckpt.get("epoch", -1), ckpt.get("val_ade", float("nan"))
     )
     return model
 
@@ -121,8 +119,8 @@ def _tta_predict(model, camera, history, command):
     This exploits left-right symmetry for a free ~0.02-0.04 ADE improvement.
     """
     # Normal
-    preds_normal, rl_normal = model(camera, history, command)
-    pred_normal = _pick_best_pred(preds_normal, rl_normal)  # (B, 60, 2)
+    fine_preds, _, rl_normal = model(camera, history, command)
+    pred_normal = _pick_best_pred(fine_preds, rl_normal)
 
     # Mirrored
     import torchvision.transforms.v2 as T
@@ -139,8 +137,8 @@ def _tta_predict(model, camera, history, command):
         torch.where(command == 2, torch.tensor(1, device=command.device), command),
     )
 
-    preds_flip, rl_flip = model(cam_flip, hist_flip, cmd_flip)
-    pred_flip = _pick_best_pred(preds_flip, rl_flip)  # (B, 60, 2)
+    fine_preds_flip, _, rl_flip = model(cam_flip, hist_flip, cmd_flip)
+    pred_flip = _pick_best_pred(fine_preds_flip, rl_flip)
 
     # Re-flip the mirrored prediction back to original frame
     pred_flip_back = pred_flip.clone()
@@ -165,8 +163,8 @@ def run_inference(model, loader, device, has_labels=False, use_tta=False):
         if use_tta:
             pred = _tta_predict(model, camera, history, command)
         else:
-            preds, router_logits = model(camera, history, command)
-            pred = _pick_best_pred(preds, router_logits)
+            fine_preds, _, router_logits = model(camera, history, command)
+            pred = _pick_best_pred(fine_preds, router_logits)
 
         all_preds.append(pred.cpu().numpy())
 
@@ -211,8 +209,8 @@ def visualize(loader, model, device, output_path="predictions_v2.pdf", n=16, use
             if use_tta:
                 pred = _tta_predict(model, cam, hist, cmd)
             else:
-                preds, router_logits = model(cam, hist, cmd)
-                pred = _pick_best_pred(preds, router_logits)
+                fine_preds, _, router_logits = model(cam, hist, cmd)
+                pred = _pick_best_pred(fine_preds, router_logits)
 
             cameras.append(cam.cpu())
             histories.append(hist.cpu())
@@ -263,7 +261,13 @@ def visualize(loader, model, device, output_path="predictions_v2.pdf", n=16, use
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--checkpoint", required=False, default=None)
+    parser.add_argument(
+        "--checkpoints",
+        nargs="+",
+        default=None,
+        help="Multiple checkpoints to ensemble (average predictions)",
+    )
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--output", default="submission_phase1.csv")
     parser.add_argument("--split", choices=["test", "val"], default="test")
@@ -280,15 +284,21 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info("Device: %s  TTA: %s", device, args.tta)
 
-    model = load_model(args.checkpoint, device)
+    # Support both single checkpoint and multi-checkpoint ensemble
+    ckpt_paths = args.checkpoints if args.checkpoints else [args.checkpoint]
+    if not ckpt_paths or ckpt_paths == [None]:
+        raise ValueError("Provide --checkpoint or --checkpoints")
+
+    models = [load_model(p, device) for p in ckpt_paths]
+    if len(models) > 1:
+        log.info("Ensembling %d checkpoints", len(models))
 
     has_labels = args.split == "val"
     if args.split == "test":
         dataset = make_test_dataset(args.data_dir)
-        log.info("Test split: %d samples", len(dataset))
     else:
         _, dataset = make_datasets(args.data_dir)
-        log.info("Val split: %d samples — will report ADE/FDE", len(dataset))
+        log.info("Val split: %d samples", len(dataset))
 
     loader = DataLoader(
         dataset,
@@ -298,18 +308,42 @@ def main():
         pin_memory=True,
     )
 
-    preds, metrics = run_inference(model, loader, device, has_labels=has_labels, use_tta=args.tta)
+    if len(models) == 1:
+        preds, metrics = run_inference(models[0], loader, device, has_labels=has_labels, use_tta=args.tta)
+    else:
+        # Ensemble: average predictions across all checkpoints
+        all_model_preds = []
+        for m in models:
+            p, _ = run_inference(m, loader, device, has_labels=False, use_tta=args.tta)
+            all_model_preds.append(p)
+        preds = np.mean(all_model_preds, axis=0)
+        # Compute metrics on averaged predictions if we have labels
+        metrics = None
+        if has_labels:
+            from guido.losses_v2 import ade as _ade
+            from guido.losses_v2 import fde as _fde
+
+            preds_t = torch.from_numpy(preds).to(device)
+            ade_vals, fde_vals = [], []
+            for batch in loader:
+                future = batch["future"].to(device)
+                n = future.size(0)
+                # slice corresponding predictions
+                ade_vals.append(_ade(preds_t[:n], future).item())
+                fde_vals.append(_fde(preds_t[:n], future).item())
+                preds_t = preds_t[n:]
+            metrics = {"ade": float(np.mean(ade_vals)), "fde": float(np.mean(fde_vals))}
 
     if metrics:
         log.info(
             "ADE: %.4f  FDE: %.4f%s",
-            metrics["ade"],
-            metrics["fde"],
-            f"  BofK-ADE: {metrics['bofk_ade']:.4f}" if "bofk_ade" in metrics else "",
+            metrics.get("ade", float("nan")),
+            metrics.get("fde", float("nan")),
+            f"  BofK: {metrics['bofk_ade']:.4f}" if "bofk_ade" in metrics else "",
         )
 
     if args.visualize and args.split == "val":
-        visualize(loader, model, device, args.vis_output, use_tta=args.tta)
+        visualize(loader, models[0], device, args.vis_output, use_tta=args.tta)
 
     if args.split == "test":
         build_submission_csv(preds, args.output)
