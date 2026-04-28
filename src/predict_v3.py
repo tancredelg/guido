@@ -1,19 +1,19 @@
 """
-predict_v2.py — inference and submission for DrivingPlannerV2.
+predict_v3.py — inference and submission for DrivingPlannerV3.
 
 Usage
 -----
 # Validate locally (no Kaggle needed) — reports ADE/FDE on the val split:
-python src/predict_v2.py --checkpoint checkpoints/best.pth --split val
+python src/predict_v3.py --checkpoint checkpoints/best.pth --split val
 
 # Generate test submission CSV:
-python src/predict_v2.py --checkpoint checkpoints/best.pth --split test
+python src/predict_v3.py --checkpoint checkpoints/best.pth --split test
 
 # Visualise predictions as a PDF (val split only):
-python src/predict_v2.py --checkpoint checkpoints/best.pth --split val --visualize
+python src/predict_v3.py --checkpoint checkpoints/best.pth --split val --visualize
 
 # Test-time augmentation (mirror + average, free ~0.03 ADE):
-python src/predict_v2.py --checkpoint checkpoints/best.pth --split test --tta
+python src/predict_v3.py --checkpoint checkpoints/best.pth --split test --tta
 
 How to sanity-check without Kaggle
 -----------------------------------
@@ -34,62 +34,55 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from guido.dataset import make_datasets, make_test_dataset
-from guido.losses_v2 import ade as compute_ade
-from guido.losses_v2 import best_of_k_ade
-from guido.losses_v2 import fde as compute_fde
-from guido.model_v2 import DrivingPlannerV2
-from guido.utils import build_submission_csv, seed_everything
+from guido.dataset   import make_datasets, make_test_dataset
+from guido.model_v3  import DrivingPlannerV3
+from guido.losses_v2 import ade as compute_ade, fde as compute_fde, best_of_k_ade
+from guido.utils     import seed_everything, build_submission_csv
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
-IMAGENET_STD = np.array([0.229, 0.224, 0.225])
+IMAGENET_STD  = np.array([0.229, 0.224, 0.225])
 
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 
-
-def load_model(checkpoint_path: str, device: torch.device) -> DrivingPlannerV2:
+def load_model(checkpoint_path: str, device: torch.device) -> DrivingPlannerV3:
     ckpt = torch.load(checkpoint_path, map_location=device)
-    cfg = ckpt.get("cfg", {})
-    model = DrivingPlannerV2(
-        dino_model=cfg.get("dino_model", "dinov3_vitb16"),
-        dino_repo_dir=cfg["dino_repo_dir"],
-        dino_weights=cfg["dino_weights"],
-        unfreeze_blocks=cfg.get("unfreeze_blocks", 1),
-        d=cfg.get("d", 256),
-        num_heads=cfg.get("num_heads", 4),
-        hist_layers=cfg.get("hist_layers", 2),
-        dec_layers=cfg.get("dec_layers", 2),
-        K=cfg.get("K", 3),
-        n_coarse=cfg.get("n_coarse", 6),
-        dropout=cfg.get("dropout", 0.0),  # no dropout at inference
-        cmd_embed_dim=cfg.get("cmd_embed_dim", 64),
-        smoothness_weight=0.0,  # unused at inference
+    cfg  = ckpt.get("cfg", {})
+    model = DrivingPlannerV3(
+        dino_model        = cfg.get("dino_model",         "dinov3_vitb16"),
+        dino_repo_dir     = cfg["dino_repo_dir"],
+        dino_weights      = cfg["dino_weights"],
+        unfreeze_blocks   = cfg.get("unfreeze_blocks",    1),
+        d                 = cfg.get("d",                  256),
+        num_heads         = cfg.get("num_heads",          4),
+        hist_layers       = cfg.get("hist_layers",        2),
+        dec_layers        = cfg.get("dec_layers",         3),
+        K                 = cfg.get("K",                  1),
+        n_coarse          = cfg.get("n_coarse",           5),
+        dropout           = cfg.get("dropout",            0.0),
+        cmd_embed_dim     = cfg.get("cmd_embed_dim",      128),
+        smoothness_weight = 0.0,
+        rope_grid_size    = cfg.get("rope_grid_size",     16),
+        rope_base         = cfg.get("rope_base",          10000.0),
     )
     missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
     if missing or unexpected:
         non_router_missing = [k for k in missing if "router" not in k]
         if non_router_missing:
             log.warning("Non-router keys missing — architecture mismatch: %s", non_router_missing)
-        log.info(
-            "Router keys not loaded (architecture mismatch between code and checkpoint "
-            "— update model_v2.py router definition to match trained model): "
-            "missing=%d unexpected=%d",
-            len(missing),
-            len(unexpected),
-        )
+        log.info("Router keys not loaded (architecture mismatch between code and checkpoint "
+                 "— update model_v3.py router definition to match trained model): "
+                 "missing=%d unexpected=%d", len(missing), len(unexpected))
     model.to(device).eval()
-    log.info(
-        "Loaded checkpoint: epoch %d  val ADE %.4f", ckpt.get("epoch", -1), ckpt.get("val_ade", float("nan"))
-    )
+    log.info("Loaded checkpoint: epoch %d  val ADE %.4f",
+             ckpt.get("epoch", -1), ckpt.get("val_ade", float("nan")))
     return model
 
 
 # ── Best-head selection ───────────────────────────────────────────────────────
-
 
 def _pick_best_pred(preds: list, router_logits: torch.Tensor) -> torch.Tensor:
     """
@@ -100,14 +93,13 @@ def _pick_best_pred(preds: list, router_logits: torch.Tensor) -> torch.Tensor:
     K = len(preds)
     if K == 1:
         return preds[0]
-    best_k = router_logits.argmax(dim=-1)  # (B,)
-    stacked = torch.stack(preds, dim=0)  # (K, B, 60, 2)
+    best_k  = router_logits.argmax(dim=-1)             # (B,)
+    stacked = torch.stack(preds, dim=0)                # (K, B, 60, 2)
     idx_exp = best_k.view(1, -1, 1, 1).expand(1, -1, 60, 2)
-    return stacked.gather(0, idx_exp).squeeze(0)  # (B, 60, 2)
+    return stacked.gather(0, idx_exp).squeeze(0)       # (B, 60, 2)
 
 
 # ── Test-time augmentation ────────────────────────────────────────────────────
-
 
 @torch.no_grad()
 def _tta_predict(model, camera, history, command):
@@ -125,24 +117,20 @@ def _tta_predict(model, camera, history, command):
 
     # Mirrored
     import torchvision.transforms.v2 as T
-
-    cam_flip = T.functional.horizontal_flip(camera)
+    cam_flip  = T.functional.horizontal_flip(camera)
     hist_flip = history.clone()
-    hist_flip[:, :, 0] *= -1  # negate x
-    hist_flip[:, :, 2] *= -1  # negate sin(heading)
-    cmd_flip = command.clone()
+    hist_flip[:, :, 0] *= -1   # negate x
+    hist_flip[:, :, 2] *= -1   # negate sin(heading)
+    cmd_flip  = command.clone()
     # swap left (1) ↔ right (2), leave forward (0) alone
-    cmd_flip = torch.where(
-        command == 1,
-        torch.tensor(2, device=command.device),
-        torch.where(command == 2, torch.tensor(1, device=command.device), command),
-    )
+    cmd_flip = torch.where(command == 1, torch.tensor(2, device=command.device),
+               torch.where(command == 2, torch.tensor(1, device=command.device), command))
 
     fine_preds_flip, _, rl_flip = model(cam_flip, hist_flip, cmd_flip)
     pred_flip = _pick_best_pred(fine_preds_flip, rl_flip)
 
     # Re-flip the mirrored prediction back to original frame
-    pred_flip_back = pred_flip.clone()
+    pred_flip_back        = pred_flip.clone()
     pred_flip_back[:, :, 0] *= -1
 
     return (pred_normal + pred_flip_back) / 2.0
@@ -150,14 +138,13 @@ def _tta_predict(model, camera, history, command):
 
 # ── Inference ─────────────────────────────────────────────────────────────────
 
-
 @torch.no_grad()
 def run_inference(model, loader, device, has_labels=False, use_tta=False):
     model.eval()
     all_preds, ade_vals, fde_vals, bofk_vals = [], [], [], []
 
     for batch in loader:
-        camera = batch["camera"].to(device)
+        camera  = batch["camera"].to(device)
         history = batch["history"].to(device)
         command = batch["command"].to(device)
 
@@ -177,11 +164,11 @@ def run_inference(model, loader, device, has_labels=False, use_tta=False):
                 bofk_vals.append(best_of_k_ade(pred, future).item())
 
     preds_np = np.concatenate(all_preds, axis=0)
-    metrics = None
+    metrics  = None
     if has_labels:
         metrics = {
-            "ade": float(np.mean(ade_vals)),
-            "fde": float(np.mean(fde_vals)),
+            "ade":      float(np.mean(ade_vals)),
+            "fde":      float(np.mean(fde_vals)),
         }
         if bofk_vals:
             metrics["bofk_ade"] = float(np.mean(bofk_vals))
@@ -190,10 +177,9 @@ def run_inference(model, loader, device, has_labels=False, use_tta=False):
 
 # ── Visualisation ─────────────────────────────────────────────────────────────
 
-
-def visualize(loader, model, device, output_path="predictions_v2.pdf", n=16, use_tta=False):
+def visualize(loader, model, device, output_path="predictions_v3.pdf",
+              n=16, use_tta=False):
     import matplotlib
-
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.backends.backend_pdf import PdfPages
@@ -203,9 +189,9 @@ def visualize(loader, model, device, output_path="predictions_v2.pdf", n=16, use
 
     with torch.no_grad():
         for batch in loader:
-            cam = batch["camera"].to(device)
+            cam  = batch["camera"].to(device)
             hist = batch["history"].to(device)
-            cmd = batch["command"].to(device)
+            cmd  = batch["command"].to(device)
 
             if use_tta:
                 pred = _tta_predict(model, cam, hist, cmd)
@@ -221,10 +207,10 @@ def visualize(loader, model, device, output_path="predictions_v2.pdf", n=16, use
             if sum(c.shape[0] for c in cameras) >= n:
                 break
 
-    cameras = torch.cat(cameras)[:n]
+    cameras   = torch.cat(cameras)[:n]
     histories = torch.cat(histories)[:n]
     preds_out = torch.cat(preds_list)[:n]
-    has_gt = len(futures) > 0
+    has_gt    = len(futures) > 0
     if has_gt:
         futures = torch.cat(futures)[:n]
 
@@ -239,16 +225,13 @@ def visualize(loader, model, device, output_path="predictions_v2.pdf", n=16, use
                 axes[0][col].imshow(np.clip(img, 0, 1))
                 axes[0][col].axis("off")
                 ax = axes[1][col]
-                ax.plot(
-                    histories[j, :, 0], histories[j, :, 1], "o-", color="gold", ms=3, lw=1, label="history"
-                )
+                ax.plot(histories[j, :, 0], histories[j, :, 1],
+                        "o-", color="gold", ms=3, lw=1, label="history")
                 if has_gt:
-                    ax.plot(
-                        futures[j, :, 0], futures[j, :, 1], "o-", color="limegreen", ms=3, lw=1, label="GT"
-                    )
-                ax.plot(
-                    preds_out[j, :, 0], preds_out[j, :, 1], "o-", color="tomato", ms=3, lw=1, label="pred"
-                )
+                    ax.plot(futures[j, :, 0], futures[j, :, 1],
+                            "o-", color="limegreen", ms=3, lw=1, label="GT")
+                ax.plot(preds_out[j, :, 0], preds_out[j, :, 1],
+                        "o-", color="tomato", ms=3, lw=1, label="pred")
                 ax.set_aspect("equal")
                 ax.legend(fontsize=7)
             plt.tight_layout()
@@ -259,26 +242,20 @@ def visualize(loader, model, device, output_path="predictions_v2.pdf", n=16, use
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", required=False, default=None)
-    parser.add_argument(
-        "--checkpoints",
-        nargs="+",
-        default=None,
-        help="Multiple checkpoints to ensemble (average predictions)",
-    )
-    parser.add_argument("--data-dir", default="data")
-    parser.add_argument("--output", default="submission_phase1.csv")
-    parser.add_argument("--split", choices=["test", "val"], default="test")
-    parser.add_argument("--visualize", action="store_true")
-    parser.add_argument("--vis-output", default="predictions_v2.pdf")
-    parser.add_argument(
-        "--tta", action="store_true", help="Test-time augmentation: mirror + average (~free ADE gain)"
-    )
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--checkpoint",  required=False, default=None)
+    parser.add_argument("--checkpoints", nargs="+", default=None,
+                        help="Multiple checkpoints to ensemble (average predictions)")
+    parser.add_argument("--data-dir",    default="data")
+    parser.add_argument("--output",      default="submission_phase1.csv")
+    parser.add_argument("--split",       choices=["test", "val"], default="test")
+    parser.add_argument("--visualize",   action="store_true")
+    parser.add_argument("--vis-output",  default="predictions_v3.pdf")
+    parser.add_argument("--tta",         action="store_true",
+                        help="Test-time augmentation: mirror + average (~free ADE gain)")
+    parser.add_argument("--batch-size",  type=int, default=64)
+    parser.add_argument("--num-workers", type=int, default=4)
     args = parser.parse_args()
 
     seed_everything(42)
@@ -302,15 +279,13 @@ def main():
         log.info("Val split: %d samples", len(dataset))
 
     loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=True,
+        dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, pin_memory=True,
     )
 
     if len(models) == 1:
-        preds, metrics = run_inference(models[0], loader, device, has_labels=has_labels, use_tta=args.tta)
+        preds, metrics = run_inference(models[0], loader, device,
+                                       has_labels=has_labels, use_tta=args.tta)
     else:
         # Ensemble: average predictions across all checkpoints
         all_model_preds = []
@@ -321,10 +296,8 @@ def main():
         # Compute metrics on averaged predictions if we have labels
         metrics = None
         if has_labels:
-            from guido.losses_v2 import ade as _ade
-            from guido.losses_v2 import fde as _fde
-
-            preds_t = torch.from_numpy(preds).to(device)
+            from guido.losses_v2 import ade as _ade, fde as _fde
+            preds_t  = torch.from_numpy(preds).to(device)
             ade_vals, fde_vals = [], []
             for batch in loader:
                 future = batch["future"].to(device)
@@ -336,12 +309,9 @@ def main():
             metrics = {"ade": float(np.mean(ade_vals)), "fde": float(np.mean(fde_vals))}
 
     if metrics:
-        log.info(
-            "ADE: %.4f  FDE: %.4f%s",
-            metrics.get("ade", float("nan")),
-            metrics.get("fde", float("nan")),
-            f"  BofK: {metrics['bofk_ade']:.4f}" if "bofk_ade" in metrics else "",
-        )
+        log.info("ADE: %.4f  FDE: %.4f%s",
+                 metrics.get("ade", float("nan")), metrics.get("fde", float("nan")),
+                 f"  BofK: {metrics['bofk_ade']:.4f}" if "bofk_ade" in metrics else "")
 
     if args.visualize and args.split == "val":
         visualize(loader, models[0], device, args.vis_output, use_tta=args.tta)

@@ -1,0 +1,50 @@
+# V2 Coarse-to-Fine — single head (no routing)
+# Coarse head provides auxiliary gradient signal at anchor waypoints.
+# This alone may improve the single-head baseline.
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido
+wandb_run_name: v2-c2f-L-5h++BS96
+
+data_dir:       data
+checkpoint_dir: checkpoints
+dino_model:     dinov3_vitb16
+dino_repo_dir:  /scratch/toumieh/tanc/dinov3
+dino_weights:   /scratch/toumieh/tanc/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+seed: 42
+batch_size:       32
+num_workers:      4
+
+weighted_sampler: true
+mirror_p:         0.1
+hist_noise_std:   0.01
+mirror_warmup:    5
+
+unfreeze_blocks:  1
+d:                256
+num_heads:        4
+hist_layers:      4
+dec_layers:       5
+K:                6
+n_coarse:         6
+dropout:          0.05
+cmd_embed_dim:    128
+
+loss_near_weight:  0.6
+loss_far_weight:   2.2
+smoothness_weight: 0.08
+coarse_weight:     0.25
+wta_weight:        0.75
+router_weight:     0.4
+router_warmup_epochs: 80
+
+num_epochs:    400
+warmup_epochs: 10
+
+lr:            8.0e-5
+backbone_lr:   7.0e-6
+weight_decay:  1.0e-3
+grad_clip:     1.0
+min_lr:        5.0e-7
+log_interval:  20

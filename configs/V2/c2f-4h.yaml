@@ -4,16 +4,16 @@
 
 wandb_entity:   tancredelg-personal
 wandb_project:  dlav-guido
-wandb_run_name: v2-c2f-4h
+wandb_run_name: v2-c2f-4h-BS64
 
 data_dir:       data
 checkpoint_dir: checkpoints
 dino_model:     dinov3_vitb16
-dino_repo_dir:  /scratch/izar/tlamort/dinov3
-dino_weights:   /scratch/izar/tlamort/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+dino_repo_dir:  /scratch/toumieh/tanc/dinov3
+dino_weights:   /scratch/toumieh/tanc/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
 
 seed: 42
-batch_size:       32
+batch_size:       64
 num_workers:      4
 
 weighted_sampler: true

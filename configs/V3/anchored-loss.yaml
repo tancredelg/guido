@@ -1,0 +1,57 @@
+# DrivingPlannerV3 baseline — your best V2 config with velocity prediction
+# and 2D RoPE patch attention. Should be a drop-in replacement.
+# Run with: python src/train_v3.py --config configs/v3_baseline.yaml
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido-V3
+wandb_run_name: 128cmd-384D/4-2his-2dec-5cor
+
+data_dir:       /scratch/toumieh/tanc/guido/data
+checkpoint_dir: checkpoints
+dino_model:     dinov3_vitb16
+dino_repo_dir:  /scratch/toumieh/tanc/dinov3
+dino_weights:   /scratch/toumieh/tanc/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+seed:             42
+
+batch_size:       32
+num_workers:      2
+weighted_sampler: false
+mirror_p:         0.1
+hist_noise_std:   0.00
+mirror_warmup:    5
+
+# === Architecture
+unfreeze_blocks: 1
+cmd_embed_dim:   128
+d:               384
+num_heads:       4
+rope_grid_size:  16  # 2D RoPE on patches (grid 16×16 = 256 tokens for ViT-B/16 at 256px input)
+rope_base:       10000.0
+hist_layers:     2
+dec_layers:      2
+K:               1
+n_coarse:        5
+dropout:         0.05
+
+# === Loss
+loss_weighting:       linear  # U-shaped weighting = more importance on start and end of trajectory
+loss_near_weight:     0.5
+loss_far_weight:      2.0
+fde_weight:           0.0
+stationary_weight:    0.0
+smoothness_weight:    0.08
+coarse_weight:        0.3
+wta_weight:           1.0
+router_weight:        0.0
+router_warmup_epochs: 0
+
+# === Optimisation
+num_epochs:    500
+warmup_epochs: 20
+lr:            1.0e-4
+backbone_lr:   8.0e-6
+weight_decay:  1.0e-3
+grad_clip:     1.0
+min_lr:        8.0e-7
+log_interval:  20

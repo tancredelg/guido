@@ -1,71 +1,43 @@
 """
-DrivingPlannerV2 — Coarse-to-Fine with trajectory-conditioned routing
-=====================================================================
+DrivingPlannerV2 — separate CoarseHead MLP + full-capacity FineHead decoder.
 
-Key insight from experiments
------------------------------
-The original router failed because it predicted "which head wins" from the
-same input features the heads use to produce trajectories. The winner depends
-on trajectory quality (ADE vs GT), not just input features — so the router
-had no privileged information to make that decision.
-
-Fix: coarse-to-fine decoding. Each head first produces a cheap coarse
-prediction (a few anchor waypoints), then the router sees ALL coarse
-predictions simultaneously and picks which head's trajectory to refine.
-This gives the router actual trajectory content to compare — not just input
-features — making it a genuine quality discriminator.
-
-Information flow
-----------------
-camera → DINOv3 ViT-B → cls (B,D), patches (B,256,D)
+Architecture
+------------
+camera  → DINOv3 ViT-B → cls (B,D), patches (B,256,D)
 history → TransformerEncoder → hist_tokens (B,21,d), hist_cls (B,d)
 command → Embedding → cmd (B,d)
 
-SceneMotionFusion: hist_tokens attend over patches → enriched_hist (B,21,d)
-ctx = proj(cat[img_cls, hist_cls, cmd])  → (B,d)
+SceneMotionFusion: hist_tokens attend over patches → enriched hist_tokens
+ctx = proj(cat[img_cls, hist_cls, cmd])  (B,d)
+fused = cat[img_cls, hist_cls, cmd]      (B,d*3)  — for coarse MLP inputs
 
-Stage 1 — Coarse heads (lightweight, shared architecture):
-    Each head: MLP(fused) → (B, N_coarse, 2)  e.g. 6 anchor waypoints
-    These are cheap and provide trajectory-level content to the router.
+Per head:
+  CoarseHead (MLP): fused → (B, n_coarse, 2)   separate, keeps fine capacity
+  FineHead  (TFmr): hist_tokens + ctx → (B, 60, 2)  all dec_layers available
 
-Router (trajectory-conditioned):
-    Input: cat([ctx, coarse_0, ..., coarse_{K-1}])  all flattened
-    → MLP → (B, K) logits
-    During warmup: router frozen, but coarse heads still train
-    After warmup: router sees meaningful coarse predictions to compare
+Router (K>1, n_coarse>0): cat[ctx, all_coarse_flat] → MLP → (B,K) logits
+  Trajectory-conditioned: router sees actual trajectory sketches to compare.
 
-Stage 2 — Fine heads (transformer decoder, same as before):
-    Each head: 60 learned queries attend over enriched context
-    → (B, 60, 2) full trajectory
-
-Training: WTA on fine predictions, router CE on coarse-informed logits
-Inference: router argmax selects the fine head
+n_coarse=0 → CoarseHead disabled, router sees ctx only (or no router for K=1)
+K=1        → no router, no WTA, just single FineHead + optional coarse aux loss
 """
 
-import logging
 import math
-
+import logging
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 log = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Utilities
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Utilities ─────────────────────────────────────────────────────────────────
 
 
-def _proj(in_dim: int, out_dim: int) -> nn.Sequential:
-    return nn.Sequential(
-        nn.Linear(in_dim, out_dim),
-        nn.LayerNorm(out_dim),
-        nn.GELU(),
-    )
+def _proj(in_dim, out_dim):
+    return nn.Sequential(nn.Linear(in_dim, out_dim), nn.LayerNorm(out_dim), nn.GELU())
 
 
-def _sinusoidal_pe(length: int, d: int) -> torch.Tensor:
+def _sinusoidal_pe(length, d):
     pe = torch.zeros(length, d)
     pos = torch.arange(length).unsqueeze(1).float()
     div = torch.exp(torch.arange(0, d, 2).float() * (-math.log(10000.0) / d))
@@ -74,9 +46,7 @@ def _sinusoidal_pe(length: int, d: int) -> torch.Tensor:
     return pe
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# History Transformer encoder
-# ─────────────────────────────────────────────────────────────────────────────
+# ── History encoder ───────────────────────────────────────────────────────────
 
 
 class HistoryEncoder(nn.Module):
@@ -101,14 +71,10 @@ class HistoryEncoder(nn.Module):
         return x, x.mean(dim=1)  # tokens (B,21,d), cls (B,d)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Scene-motion cross-attention
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Scene-motion cross-attention ──────────────────────────────────────────────
 
 
 class SceneMotionFusion(nn.Module):
-    """History tokens attend over image patch tokens."""
-
     def __init__(self, d, num_heads=4, dropout=0.1):
         super().__init__()
         self.attn = nn.MultiheadAttention(d, num_heads, dropout=dropout, batch_first=True)
@@ -123,19 +89,17 @@ class SceneMotionFusion(nn.Module):
         return self.norm_out(hist_tokens + out)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Coarse head (Stage 1) — cheap MLP, produces anchor waypoints
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Coarse head (separate MLP) ────────────────────────────────────────────────
 
 
 class CoarseHead(nn.Module):
     """
-    Lightweight MLP producing N_coarse anchor waypoints from the fused vector.
-    These are used by the router to compare trajectory shapes across heads.
-    They are also used as auxiliary supervision targets (interpolated from GT).
+    Lightweight MLP: fused_vector → n_coarse anchor waypoints.
+    Completely separate from the fine decoder — preserves its full capacity.
+    Used for (a) router trajectory conditioning and (b) auxiliary coarse loss.
     """
 
-    def __init__(self, fused_dim: int, d: int, n_coarse: int = 6, dropout: float = 0.05):
+    def __init__(self, fused_dim, d, n_coarse, dropout=0.05):
         super().__init__()
         self.n_coarse = n_coarse
         self.net = nn.Sequential(
@@ -150,13 +114,17 @@ class CoarseHead(nn.Module):
         return self.net(fused).reshape(fused.size(0), self.n_coarse, 2)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fine head (Stage 2) — transformer decoder, full 60-step trajectory
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Fine head (full-capacity transformer decoder) ─────────────────────────────
 
 
 class FineHead(nn.Module):
-    def __init__(self, d, num_heads=4, num_layers=2, dropout=0.1, num_waypoints=60):
+    """
+    All dec_layers used for fine trajectory decoding.
+    60 learned queries + sinusoidal PE cross-attend over
+    [hist_tokens (B,21,d) | ctx_token (B,1,d)].
+    """
+
+    def __init__(self, d, num_heads=4, dec_layers=3, dropout=0.1, num_waypoints=60):
         super().__init__()
         self.T = num_waypoints
         self.query_embed = nn.Embedding(num_waypoints, d)
@@ -169,35 +137,31 @@ class FineHead(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        self.decoder = nn.TransformerDecoder(layer, num_layers=num_layers)
-        self.out_proj = nn.Linear(d, 2)
+        self.decoder = nn.TransformerDecoder(layer, num_layers=dec_layers)
+        self.fine_proj = nn.Linear(d, 2)
 
     def forward(self, hist_tokens, ctx_token):
         B = hist_tokens.size(0)
-        context = torch.cat([hist_tokens, ctx_token], dim=1)  # (B, 22, d)
+        context = torch.cat([hist_tokens, ctx_token], dim=1)
         queries = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1) + self.pe.unsqueeze(0)
-        return self.out_proj(self.decoder(queries, context))  # (B, 60, 2)
+        return self.fine_proj(self.decoder(queries, context))  # (B, 60, 2)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main V2 model
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Main model ────────────────────────────────────────────────────────────────
 
 
 class DrivingPlannerV2(nn.Module):
     """
     Config keys
     -----------
-    d                : inner model dim (default 256)
-    K                : number of mixture heads (default 3; 1 = single head, no routing)
-    n_coarse         : anchor waypoints per coarse head (default 6)
-    unfreeze_blocks  : unfreeze last N ViT-B blocks (default 1)
-    hist_layers      : transformer encoder layers (default 2)
-    dec_layers       : fine decoder layers per head (default 2)
-    num_heads        : attention heads (default 4)
-    dropout          : dropout (default 0.05)
-    cmd_embed_dim    : command embedding dim (default 64)
-    smoothness_weight: smoothness regulariser weight (default 0.05)
+    d               : inner dim (default 256)
+    K               : mixture heads; 1 = no routing
+    n_coarse        : anchor waypoints for coarse MLP; 0 = disabled
+    unfreeze_blocks : unfreeze last N ViT-B blocks
+    hist_layers     : history transformer encoder layers
+    dec_layers      : fine decoder layers per head
+    num_heads       : attention heads
+    dropout, cmd_embed_dim, smoothness_weight : as named
     """
 
     def __init__(
@@ -210,7 +174,7 @@ class DrivingPlannerV2(nn.Module):
         d: int = 256,
         num_heads: int = 4,
         hist_layers: int = 2,
-        dec_layers: int = 2,
+        dec_layers: int = 3,
         K: int = 3,
         n_coarse: int = 6,
         dropout: float = 0.05,
@@ -240,9 +204,9 @@ class DrivingPlannerV2(nn.Module):
             for blk in self.backbone.blocks[-unfreeze_blocks:]:
                 for p in blk.parameters():
                     p.requires_grad = True
-        dino_dim: int = self.backbone.embed_dim
+        dino_dim = self.backbone.embed_dim
 
-        # ── History encoder ───────────────────────────────────────────────
+        # ── Encoders ──────────────────────────────────────────────────────
         self.hist_enc = HistoryEncoder(4, d, num_heads, hist_layers, dropout)
         self.cmd_embed = nn.Embedding(3, cmd_embed_dim)
         self.img_proj = _proj(dino_dim, d)
@@ -254,24 +218,23 @@ class DrivingPlannerV2(nn.Module):
             nn.LayerNorm(d),
             nn.GELU(),
         )
-        fused_dim = d * 3  # img_cls | hist_cls | cmd
+        fused_dim = d * 3
 
-        # ── Stage 1: coarse heads ─────────────────────────────────────────
-        # Always built even for K=1 (used as auxiliary loss / better gradient)
-        self.coarse_heads = nn.ModuleList(
-            [CoarseHead(fused_dim, d, n_coarse, dropout) for _ in range(max(K, 1))]
+        # ── Coarse heads (separate MLP, optional) ─────────────────────────
+        self.coarse_heads = (
+            nn.ModuleList([CoarseHead(fused_dim, d, n_coarse, dropout) for _ in range(max(K, 1))])
+            if n_coarse > 0
+            else None
         )
 
-        # ── Stage 2: fine heads ───────────────────────────────────────────
-        self.fine_heads = nn.ModuleList(
+        # ── Fine heads (full-capacity transformer decoder) ─────────────────
+        self.heads = nn.ModuleList(
             [FineHead(d, num_heads, dec_layers, dropout, num_waypoints) for _ in range(max(K, 1))]
         )
 
-        # ── Router (trajectory-conditioned) ───────────────────────────────
-        # Input: ctx vector + all K coarse predictions (flattened)
-        # This gives the router actual trajectory shapes to compare.
+        # ── Router (trajectory-conditioned when n_coarse > 0) ─────────────
         if K > 1:
-            router_in = d + K * n_coarse * 2
+            router_in = d + K * n_coarse * 2 if n_coarse > 0 else d
             self.router = nn.Sequential(
                 nn.Linear(router_in, d),
                 nn.LayerNorm(d),
@@ -291,24 +254,22 @@ class DrivingPlannerV2(nn.Module):
         own = [self.img_proj, self.patch_proj, self.cmd_proj, self.ctx_proj, self.scene_motion]
         if self.K > 1:
             own.append(self.router)
+        if self.coarse_heads is not None:
+            own.extend(self.coarse_heads)
         for module in own:
             for m in module.modules():
                 if isinstance(m, nn.Linear):
                     nn.init.xavier_uniform_(m.weight)
                     if m.bias is not None:
                         nn.init.zeros_(m.bias)
-        for head in self.fine_heads:
-            nn.init.xavier_uniform_(head.out_proj.weight, gain=0.1)
-            nn.init.zeros_(head.out_proj.bias)
-        for head in self.coarse_heads:
-            # small init so coarse predictions start near zero
-            nn.init.xavier_uniform_(head.net[-1].weight, gain=0.1)
-            nn.init.zeros_(head.net[-1].bias)
+        for head in self.heads:
+            nn.init.xavier_uniform_(head.fine_proj.weight, gain=0.1)
+            nn.init.zeros_(head.fine_proj.bias)
         for m in self.modules():
             if isinstance(m, nn.Embedding):
                 nn.init.normal_(m.weight, std=0.02)
 
-    # ── Backbone ──────────────────────────────────────────────────────────
+    # ── Backbone features ─────────────────────────────────────────────────
 
     def _backbone_features(self, camera):
         feats = self.backbone.forward_features(camera)
@@ -319,40 +280,41 @@ class DrivingPlannerV2(nn.Module):
     def forward(self, camera, history, command):
         B = camera.size(0)
 
-        # 1. Image
+        # Image
         if self.unfreeze_blocks == 0:
             with torch.no_grad():
                 cls, patches = self._backbone_features(camera)
         else:
             cls, patches = self._backbone_features(camera)
 
-        # 2. History
+        # History + command
         hist_tokens, hist_cls = self.hist_enc(history)
         cmd = self.cmd_proj(self.cmd_embed(command))
         img_cls = self.img_proj(cls)
-        patch_proj = self.patch_proj(patches)
-        hist_tokens = self.scene_motion(hist_tokens, patch_proj)
+        hist_tokens = self.scene_motion(hist_tokens, self.patch_proj(patches))
 
-        # 3. Global context
-        ctx = self.ctx_proj(torch.cat([img_cls, hist_cls, cmd], dim=-1))  # (B,d)
-        ctx_token = ctx.unsqueeze(1)  # (B,1,d)
+        # Context
+        ctx = self.ctx_proj(torch.cat([img_cls, hist_cls, cmd], dim=-1))
+        ctx_token = ctx.unsqueeze(1)
+        fused = torch.cat([img_cls, hist_cls, cmd], dim=-1)
 
-        # 4. Fused vector for coarse heads and concat baseline
-        fused = torch.cat([img_cls, hist_cls, cmd], dim=-1)  # (B, d*3)
+        # Coarse predictions (separate MLP)
+        if self.coarse_heads is not None:
+            coarse_preds = [h(fused) for h in self.coarse_heads]
+        else:
+            coarse_preds = [None] * max(self.K, 1)
 
-        # 5. Stage 1: coarse predictions from each head
-        coarse_preds = [h(fused) for h in self.coarse_heads]  # K × (B, n_coarse, 2)
+        # Fine predictions (full transformer decoder)
+        fine_preds = [h(hist_tokens, ctx_token) for h in self.heads]
 
-        # 6. Router: sees ctx + all coarse predictions flattened
-        if self.K > 1:
-            coarse_flat = torch.cat([c.reshape(B, -1) for c in coarse_preds], dim=-1)  # (B, K*n_coarse*2)
-            router_in = torch.cat([ctx, coarse_flat], dim=-1)  # (B, d + K*n_coarse*2)
-            router_logits = self.router(router_in)  # (B, K)
+        # Router
+        if self.K > 1 and self.n_coarse > 0:
+            coarse_flat = torch.cat([c.reshape(B, -1) for c in coarse_preds], dim=-1)
+            router_logits = self.router(torch.cat([ctx, coarse_flat], dim=-1))
+        elif self.K > 1:
+            router_logits = self.router(ctx)
         else:
             router_logits = torch.zeros(B, 1, device=camera.device)
-
-        # 7. Stage 2: fine predictions from each head
-        fine_preds = [h(hist_tokens, ctx_token) for h in self.fine_heads]  # K × (B, 60, 2)
 
         return fine_preds, coarse_preds, router_logits
 

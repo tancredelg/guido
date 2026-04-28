@@ -5,18 +5,18 @@
 #               tail -f logs/<job_id>.out
 
 #SBATCH --job-name=guido_train
-#SBATCH --partition=gpu
+#SBATCH --partition=h100
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=6                  # config's num_workers + 2
+#SBATCH --cpus-per-task=12
 #SBATCH --mem=64G
 #SBATCH --time=03:00:00
-#SBATCH --output=logs/V2/%j.out
-#SBATCH --error=logs/V2/%j.err
+#SBATCH --output=logs/V3/%j.out
+#SBATCH --error=logs/V3/%j.err
+
+SCRATCH=/scratch/$USER/tanc
 
 set -euo pipefail
-mkdir -p logs
-
-SCRATCH=/scratch/izar/$USER
+mkdir -p $SCRATCH/guido/logs/V3/
 
 # ── DINOv3 paths ──────────────────────────────────────────────────────────────
 # Set these to wherever you cloned the repo and downloaded the weights.
@@ -24,15 +24,12 @@ SCRATCH=/scratch/izar/$USER
 #   git clone https://github.com/facebookresearch/dinov3.git $SCRATCH/dinov3
 #   wget -O $SCRATCH/dinov3/weights/dinov3_vits16_pretrain_lvd1689m.pth \
 #        '<URL from Meta access email>'
-# DINO_REPO=$SCRATCH/dinov3
-# DINO_WEIGHTS=$SCRATCH/dinov3/weights/dinov3_vits16_pretrain_lvd1689m.pth
- 
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 # Data lives on scratch for fast I/O; override the config path via CLI flag.
-DATA_DIR=$SCRATCH/CIVIL-459/guido/data
+DATA_DIR=$SCRATCH/guido/data
 
-CFG='configs/V2/c2f-4h.yaml'
+CFG='configs/V3/final.yaml'
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 echo "Job $SLURM_JOB_ID starting on $(hostname) at $(date)"
@@ -47,7 +44,7 @@ echo "Config: $CFG"
 # find src/guido -name "*.pyc" -delete
 # find src/guido -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
-uv run src/train_v2.py \
+uv run src/train_v3.py \
     --config   "$CFG" \
     --data-dir "$DATA_DIR"
 
