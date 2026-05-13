@@ -5,18 +5,18 @@
 #               tail -f logs/<job_id>.out
 
 #SBATCH --job-name=guido_train
-#SBATCH --partition=h100
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
 #SBATCH --time=03:00:00
-#SBATCH --output=logs/V3/%j.out
-#SBATCH --error=logs/V3/%j.err
+#SBATCH --output=logs/V4/%j.out
+#SBATCH --error=logs/V4/%j.err
 
 SCRATCH=/scratch/$USER/tanc
 
 set -euo pipefail
-mkdir -p $SCRATCH/guido/logs/V3/
+mkdir -p $SCRATCH/guido/logs/V4/
 
 # ── DINOv3 paths ──────────────────────────────────────────────────────────────
 # Set these to wherever you cloned the repo and downloaded the weights.
@@ -29,7 +29,7 @@ mkdir -p $SCRATCH/guido/logs/V3/
 # Data lives on scratch for fast I/O; override the config path via CLI flag.
 DATA_DIR=$SCRATCH/guido/data
 
-CFG='configs/V3/final.yaml'
+CFG='configs/V4/p2-final.yaml'
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 echo "Job $SLURM_JOB_ID starting on $(hostname) at $(date)"
@@ -44,7 +44,7 @@ echo "Config: $CFG"
 # find src/guido -name "*.pyc" -delete
 # find src/guido -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
-uv run src/train_v3.py \
+uv run src/train_v4.py \
     --config   "$CFG" \
     --data-dir "$DATA_DIR"
 
