@@ -1,0 +1,80 @@
+# ── Guido Phase 2 config ──────────────────────────────────────────────────────
+# Trajectory prediction + depth estimation + semantic segmentation aux tasks.
+# Run: uv run src/train_v3_phase2.py --config configs/V3/phase2.yaml
+#
+# NOTE: run notebooks/explore_phase2_data.py first to confirm:
+#   - exact image resolution (img_h, img_w)
+#   - number of semantic classes (num_seg_classes)
+#   - seg_ignore_index (void/unlabelled class label, usually 255)
+#   - depth value range (for silog_loss tuning)
+
+wandb_entity:   tancredelg-personal
+wandb_project:  dlav-guido-V4
+wandb_run_name: mid_aux-uf3-no_cmd
+
+data_dir:       /scratch/toumieh/tanc/guido/data
+checkpoint_dir: checkpoints
+dino_model:     dinov3_vitb16
+dino_repo_dir:  /scratch/toumieh/tanc/dinov3
+dino_weights:   /scratch/toumieh/tanc/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+
+seed:             42
+
+batch_size:       32
+num_workers:      4
+weighted_sampler: false
+mirror_p:         0.1
+hist_noise_std:   0.00
+mirror_warmup:    5
+
+# ── Architecture ──────────────────────────────────────
+unfreeze_blocks: 3
+# cmd_embed_dim:   16  # not using
+use_cmd:         false
+d:               384
+num_heads:       4
+rope_grid_size:  16
+rope_base:       10000.0
+hist_layers:     2
+dec_layers:      2
+causal_layers:   0
+K:               1
+n_coarse:        5
+speed_cond:      true
+dropout:         0.07
+
+# ── Auxiliary heads ───────────────────────────────────────────────────────────
+img_h: 200              # original image height — aux decoder output resolution for loss
+img_w: 300              # original image width  — note: camera is resized to 256×256 for ViT;
+                        # the DPT decoder upsamples back to 200×300 to match GT labels
+use_depth_aux: true
+aux_d_dec: 128
+lambda_depth: 0.08
+use_seg_aux: true
+num_seg_classes: 14     # confirmed: labels 0–13 (max label = 13)
+seg_ignore_index: 255   # no void class observed, set high to effectively disable
+lambda_seg: 0.5
+aux_warmup_epochs: 10
+ 
+# ── Trajectory loss (same as Phase 1 best) ───────────────────────────────────
+loss_weighting: linear
+loss_near_weight: 0.5
+loss_far_weight: 2.5
+smoothness_weight: 0.1
+coarse_weight: 0.3
+fde_weight: 0.0
+stationary_weight: 0.0
+wta_weight: 1.0
+router_weight: 0.0
+router_warmup_epochs: 0
+ 
+# ── Optimisation ──────────────────────────────────────────────────────────────
+num_epochs: 500
+warmup_epochs: 20
+lr: 1.0e-4
+backbone_lr: 1.0e-5
+aux_lr: 2.0e-4          # aux decoder can use a higher lr — trained from scratch
+weight_decay: 1.0e-3
+grad_clip: 1.0
+min_lr: 5.0e-7
+log_interval: 20
