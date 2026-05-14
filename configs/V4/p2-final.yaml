@@ -6,7 +6,7 @@
 
 wandb_entity:   tancredelg-personal
 wandb_project:  dlav-guido-V4
-wandb_run_name: p2-uf2-xattn_fuse-nocmd-dep+seg.yaml
+wandb_run_name: p2-final.yaml
 
 data_dir:       data
 checkpoint_dir: checkpoints
@@ -15,16 +15,16 @@ dino_repo_dir:  /scratch/toumieh/tanc/dinov3
 dino_weights:   /scratch/toumieh/tanc/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
 
 # resume: checkpoints/run_20260513_0040_epoch313_ade1.5092.pth
-# warm_start: checkpoints/run_20260513_0040_epoch313_ade1.5092.pth
+warm_start: checkpoints/run_20260514_1636_epoch249_ade1.4784.pth
 
 seed: 42
 batch_size: 32
 num_workers: 2
 weighted_sampler: false
-mirror_p: 0.1
-hist_noise_std: 0.005
-hist_dropout_p: 0.05
-mirror_warmup: 10
+mirror_p: 0.00
+hist_noise_std: 0.00
+hist_dropout_p: 0.0
+mirror_warmup: 0
 
 # Architecture
 unfreeze_blocks: 2
@@ -38,7 +38,7 @@ dec_layers: 4
 causal_decoder: true
 K: 1
 n_coarse: 6
-dropout: 0.05
+dropout: 0.02
 
 # Auxiliary heads
 img_h: 200
@@ -52,14 +52,14 @@ aux_d_dec: 256
 lambda_depth: 0.15
 lambda_seg: 0.6
 lambda_normals: 0.2
-aux_warmup_epochs: 10
+aux_warmup_epochs: 0
 
 # Trajectory loss
 loss_weighting: linear
 loss_near_weight: 0.5
-loss_far_weight: 5.0
-smoothness_weight: 0.05
-coarse_weight: 0.4
+loss_far_weight: 15.0  # Finish with more focus on end of trajectory
+smoothness_weight: 0.02
+coarse_weight: 0.3
 fde_weight: 0.0
 stationary_weight: 0.0
 wta_weight: 1.0
@@ -70,11 +70,11 @@ router_warmup_epochs: 0
 num_epochs: 300
 warmup_epochs: 5
 lr_restart_epochs: 300  # Set to num_epochs for no restarts
-lr: 7.0e-5
-backbone_lr: 7.0e-6
-aux_lr: 1.0e-4
+lr: 4.0e-5
+backbone_lr: 7.0e-7
+aux_lr: 4.0e-4
 weight_decay: 1.0e-3
 grad_clip: 1.0
-min_lr: 7.0e-7
-log_interval: 200
+min_lr: 1.0e-7
+log_interval: 300
 vis_every_epochs: 25

@@ -5,7 +5,7 @@
 #               tail -f logs/eval_<job_id>.out
 
 #SBATCH --job-name=guido_eval
-#SBATCH --partition=mig12gb
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=11800M
@@ -26,7 +26,7 @@ echo "Data:"
 echo "$(du -sh $DATA_DIR)"
 
 uv run src/predict_v4.py \
-    --checkpoint 'checkpoints/run_20260513_2113_epoch189_ade1.4892.pth' \
+    --checkpoint 'checkpoints/run_20260514_2015_epoch249_ade1.4764.pth' \
     --split test \
     --data-dir "$DATA_DIR" \
     --visualize \
