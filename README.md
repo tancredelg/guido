@@ -5,49 +5,75 @@ trajectory planner that predicts 60 future waypoints from a single front-facing
 camera image, ego-motion history, and a high-level driving command. Trained and 
 evaluated on a subset of the [nuPlan](https://www.nuplan.org/) dataset.
 
-**Phase 1 result:**, val ADE ≈ 1.53 m over a 60-step horizon.
+**Phase 1 result: val ADE ≈ 1.53 m** over a 6-second horizon.  
+**Phase 2 result: val ADE ≈ 1.48 m** with auxiliary depth + segmentation tasks.
 
 ---
 
 ## Architecture
+
+### Phase 1 — DrivingPlannerV3
 
 ```
 Camera (3×256×256)  →  DINOv3 ViT-B/16  →  CLS token + 256 patch tokens
                         (last block unfrozen)
 
 History (21 steps)  →  Transformer encoder  →  history tokens + summary
-Command             →  Embedding
+Command             →  (dropped — all samples are 'forward')
 
 Scene-motion grounding:
   history tokens attend over patch tokens  →  2D RoPE cross-attention
-  (each history step queries the spatial image grid with positional awareness)
 
-Context token:  linear proj of [img_cls | hist_cls | cmd]
+Context token:  linear proj of [img_cls | hist_cls]
 
-Coarse head (MLP):  5 anchor waypoints  +  auxiliary MSE loss
-Fine head (Transformer decoder, 2L):
-  60 learned queries cross-attend over [grounded history tokens | context token]
-  → 60-step trajectory (B, 60, 2)
+Coarse head (MLP):  anchor waypoints  +  auxiliary MSE loss
+Fine head (Transformer decoder, 2–3L):  60-step trajectory
 ```
 
-The scene-motion cross-attention uses 2D RoPE on the patch token keys,
-matching the positional encoding scheme used internally by the DINOv3 backbone.
-This replaced a simpler V1 cross-attention variant (single motion query over
-patches) with a richer design where the entire 21-step history sequence is
-spatially grounded before decoding. The coarse MLP head provides auxiliary
-gradient at intermediate timesteps without reducing fine-decoder layer capacity.
+### Phase 2 — DrivingPlannerV4
+
+Same trajectory architecture, plus auxiliary perception heads trained jointly:
+
+```
+DINOv3 backbone (2 blocks unfrozen)
+  │
+  ├─→ trajectory pipeline (unchanged from V3)
+  │
+  └─→ patch tokens from 4 intermediate blocks (via forward hooks)
+        └─→ DPT-light decoder (feature pyramid, d=256)
+              ├─→ DepthHead    → (B, 1, H, W)  SILog loss
+              ├─→ SegHead      → (B, 14, H, W) cross-entropy
+              └─→ normals      → derived from depth gradients, free labels
+
+Images resized to 192×304 (nearest multiples of 16 to 200×300 native),
+giving a 12×19 patch grid that preserves the original aspect ratio.
+```
 
 ---
 
 ## Results
 
-| Model | Val ADE |
-|---|---|
-| V1 baseline (ViT-S, GRU, MLP decoder) | 1.96 |
-| V1 + ViT-B backbone | 1.90 |
-| V2 (Transformer history encoder) | 1.57 |
-| V2 large + coarse-to-fine | 1.54 |
-| **V3 (2D RoPE, best Phase 1)** | **1.53** |
+| Model | Val ADE | Notes |
+|---|---|---|
+| V1 baseline (ViT-S, GRU, MLP decoder) | 1.96 | Course baseline |
+| V1 + ViT-B backbone | 1.90 | |
+| V2 (Transformer history encoder) | 1.57 | |
+| V2 large + coarse-to-fine | 1.54 | |
+| V3 (2D RoPE, best Phase 1) | **1.53** | Best Phase 1 |
+| V4 + aux tasks (Phase 2) | **1.48** | Best Phase 2 |
+
+---
+
+## Qualitative results (Phase 2)
+
+![Phase 2 predictions](docs/predictions_phase2.png)
+
+*Left to right: camera input, GT depth, predicted depth, GT segmentation,
+predicted segmentation, trajectory (gold = history, green→teal = GT, red→purple = predicted).*
+
+Depth and segmentation are predicted accurately. The trajectory decoder handles
+most scenarios well; far-horizon prediction (t > 3s) remains the primary
+source of error.
 
 ---
 
@@ -61,17 +87,17 @@ uv sync
 
 **DINOv3 weights**: request access from Meta via the
 [DINOv3 GitHub repo](https://github.com/facebookresearch/dinov3).
-Download `dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth` and point
-`dino_repo_dir` / `dino_weights` in your config to its location.
+Download `dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth` and set
+`dino_repo_dir` / `dino_weights` in your config.
 
-**Dataset**: a 2.6 GB subset of nuPlan (5k train / 1k val / 1k test samples).
-For reproduction with the exact splits used here, see the
-[Kaggle competition](https://www.kaggle.com/competitions/dlav-2026-phase-1/leaderboard).
-For broader experiments, the full [nuPlan dataset](https://www.nuplan.org/)
+**Dataset**: a 2.6 GB subset of nuPlan (5k train / 1k val / 1k test).
+Kaggle competition (Phase 2): [dlav-trajectory-prediction](https://www.kaggle.com/competitions/dlav-trajectory-prediction-phase2).
+For broader experiments the full [nuPlan dataset](https://www.nuplan.org/)
 can be used with minor changes to `dataset.py`.
 
-**Hardware**: training runs on a single V100 (32 GB) in 2–4 hours.
-Logging uses [Weights & Biases](https://wandb.ai) — set `wandb_entity` in
+**Hardware**: single V100 (32 GB), 2–4 hours per training run.
+
+**Logging**: [Weights & Biases](https://wandb.ai) — set `wandb_entity` in
 your config or pass `--no-wandb` to disable.
 
 ---
@@ -79,81 +105,114 @@ your config or pass `--no-wandb` to disable.
 ## Usage
 
 ```bash
-# Train
+# Train (Phase 1)
 uv run src/train_v3.py --config configs/V3/baseline.yaml
 
-# Validate (reports ADE/FDE locally — honest estimate of Kaggle score)
-uv run src/predict_v3.py --checkpoint checkpoints/best.pth --split val
+# Train (Phase 2, with aux tasks)
+uv run src/train_v4.py --config configs/V4/phase2.yaml
 
-# Generate submission CSV
-uv run src/predict_v3.py --checkpoint checkpoints/best.pth --split test \
+# Validate
+uv run src/predict_v4.py --checkpoint checkpoints/best.pth --split val
+
+# Generate Kaggle submission
+uv run src/predict_v4.py --checkpoint checkpoints/best.pth --split test \
     --output submission.csv
 
-# Test-time augmentation (mirror flip + average, potentially free tiny ADE gain)
-uv run src/predict_v3.py --checkpoint checkpoints/best.pth --split test \
+# Test-time augmentation (mirror flip + average)
+uv run src/predict_v4.py --checkpoint checkpoints/best.pth --split test \
     --tta --output submission_tta.csv
 
-# Visualise predictions
-uv run src/predict_v3.py --checkpoint checkpoints/best.pth --split val \
+# Visualise predictions (trajectory + depth + segmentation)
+uv run src/predict_v4.py --checkpoint checkpoints/best.pth --split val \
     --visualize --vis-output predictions.pdf
 ```
 
-For SLURM clusters, see `scripts/submit_train.sh` — edit the `CFG` and
-`DATA_DIR` variables and submit with `sbatch scripts/submit_train.sh`.
+For SLURM clusters, see `scripts/submit_train.sh`.
 
 ---
 
 ## Experiments
 
-Three rounds of architecture and training changes, each building on the previous.
+### Phase 1 — V1 baseline
 
-### V1 — Baseline architecture
+Frozen DINOv3 ViT-S CLS token → GRU history encoder → concat fusion → MLP decoder.
+Best: ADE 1.96.
 
-Standard encode-fuse-decode pipeline: frozen DINOv3 ViT-S CLS token + GRU
-history encoder + concat fusion + MLP decoder. ADE ~1.96.
+Ablations explored: ViT-B backbone (✓), data augmentation (✗ aggressive hurt),
+wider dims (✗ overfit on 5k), cross-attention fusion (marginal), transformer decoder
+(marginal at this scale).
 
-Ablations: ViT-B backbone (✓ −0.06 ADE), data augmentation (✗ aggressive
-augmentation hurt), wider hidden dims (✗ overfit on 5k samples), cross-attention
-fusion (✗ marginal data), transposed-conv and transformer decoders (neither
-conclusively better than MLP at this scale).
+Bugs fixed during this phase that invalidated earlier experiments:
+- **Huber delta**: `delta=0.1` accidentally left active for absolute-position targets, flattening gradients above 10 cm. Restoring `delta=1.0` recovered ~0.2 ADE.
+- **`torch.no_grad()` unfreeze bug**: backbone wrapped unconditionally, silencing gradients through supposedly unfrozen blocks.
+- **Kaiming init on transformer attention**: applying gain=√2 to Q/K/V projections caused attention saturation at d≥384. Fixed by leaving PyTorch defaults on attention internals.
 
-Several bugs were fixed during this phase that had invalidated earlier
-experiments:
-- **Huber delta regression** — `delta=0.1` accidentally left active for
-  absolute-position targets, collapsing gradients for errors > 10 cm.
-- **`torch.no_grad()` unfreeze bug** — backbone blocks were wrapped
-  unconditionally, silencing gradients through supposedly unfrozen blocks.
-- **Kaiming init on transformer attention** — applying gain=√2 to Q/K/V
-  projections caused attention saturation at d≥384; fixed by leaving
-  PyTorch defaults on attention internals.
+### Phase 1 — V2 architecture
 
-### V2 — Transformer history encoder + mixture heads
+Transformer history encoder, scene-motion cross-attention, coarse MLP auxiliary head.
+Best single-head: ADE 1.54.
 
-Replaced GRU with a Transformer encoder so history steps can attend to each
-other directly. Added a separate MLP coarse head for auxiliary supervision.
-Best single-head result: ADE ~1.54.
+Explored K=3..6 mixture heads with winner-takes-all training. Oracle best-of-K
+ADE reached ~1.0–1.2 with K=6, showing real specialisation. A trained router
+closed the gap to ~1.65–1.7 at inference — the 5k dataset was insufficient to
+jointly train specialised heads and a quality router.
 
-Explored K=3..6 mixture heads with winner-takes-all training. Oracle
-best-of-K ADE reached **~1.0–1.2 with K=6**, demonstrating real head
-specialisation. However, a trained router could only close the
-gap to ~1.65–1.7 at inference. The 5k dataset proved insufficient to jointly
-train specialised trajectory heads and a quality routing head — the router
-CE loss competed with WTA specialisation gradient, and increasing K or
-router capacity did not resolve this. The most effective approaches attempted
-were trajectory-conditioned routing (router sees coarse predictions from each
-head, not just input features) and a two-phase training schedule (freeze
-router until heads specialise), both of which helped but left a large gap
-to the oracle.
+### Phase 1 — V3 additions
 
-### V3 — 2D RoPE + targeted improvements
+2D RoPE on patch cross-attention (matched DINOv3's internal scheme), velocity
+prediction (reverted — cumsum accumulation hurt static scenarios), causal decoder
+(marginal), speed conditioning (marginal). Best: ADE 1.53, 1st place.
 
-Added 2D RoPE to patch cross-attention. Tested velocity prediction (no
-meaningful gain over position prediction, cumsum accumulation hurt static
-scenarios), causal self-attention between decoder queries (slightly worse),
-speed scalar conditioning (marginal), and various endpoint-anchored loss
-variants (U-shaped weighting, explicit FDE term — none helped reliably).
+### Phase 2 — V4 auxiliary tasks
 
-Final result: ADE **1.53** (val), 1st place on Phase 1 leaderboard.
+The Phase 2 constraint allows auxiliary perception supervision. The hypothesis
+was that forcing the backbone to simultaneously support depth estimation and
+semantic segmentation would produce richer patch token representations, reducing
+the data ceiling on trajectory prediction.
+
+**Data**: images are 200×300 natively. Previous phases resized to 256×256
+(square), distorting the aspect ratio by 28% vertically. Phase 2 resizes to
+192×304 — the nearest multiples of 16 — preserving geometry for the perception
+heads and giving a 12×19 = 228-token patch grid.
+
+**Aux decoder**: a DPT-light feature pyramid reads patch tokens from 4
+intermediate backbone blocks (at ~25%, 50%, 75%, 100% depth). These are
+reassembled at different scales, fused coarse-to-fine via residual blocks, and
+passed to task-specific heads. `d_dec=256` gave noticeably sharper predictions
+than the initial 128.
+
+**Tasks**:
+- *Depth* (SILog loss): raw uint8 values decode as `(255 - raw)/255 * 100m`.
+  Depth predictions converged to visually accurate estimates within ~50 epochs.
+- *Segmentation* (cross-entropy, 14 classes): learned well, though the dataset
+  has a heavy class imbalance toward road/sky.
+- *Surface normals* (free labels from depth gradients, L1 loss): encodes road
+  geometry directly — flat road → upward normals, obstacles → tilted — providing
+  a complementary geometric signal to raw depth values.
+
+**Aux loss ramp**: lambda values ramped from 0 over 10–20 warmup epochs so the
+trajectory branch could stabilise before receiving aux gradient. Without this
+ramp the seg loss (many more pixel-level terms per image than trajectory terms)
+dominated early gradient and hurt trajectory convergence.
+
+**Causal decoder**: the standard transformer decoder self-attention lets query
+t=59 directly attend to query t=1, which means far-horizon queries can implicitly
+copy near-horizon estimates. Making self-attention causally masked forces each
+query to be consistent with prior queries in a temporal direction. This gave a
+modest improvement on `val/ade_far` (~3.1 → ~2.9) but results are inconclusive
+at this data scale.
+
+**Conclusion**: aux tasks trained well and improved trajectory ADE from 1.53
+to ~1.476 (~4% gain). However, the improvement is modest relative to the
+added complexity. The depth/seg heads appear to primarily regularise the
+backbone rather than teach it fundamentally new spatial reasoning — the
+representations were already strong from DINOv3 pretraining. The real ceiling
+is the 5k training set, single forward camera, and absence of map information.
+Future phases introducing BEV representations or larger datasets would be the
+natural next step.
+
+Best Phase 2 config (for cold start): `configs/V4/p2-uf2-xattn_fuse-nocmd+.yaml` (ADE ~1.49).
+- Warm-start from the best checkpoint of this config, using `configs/V4/p2-final.yaml` (ADE ~1.476).
 
 ---
 
@@ -161,30 +220,31 @@ Final result: ADE **1.53** (val), 1st place on Phase 1 leaderboard.
 
 ```
 src/
-  train.py / predict.py        V1 training and inference
-  train_v2.py / predict_v2.py  V2 training and inference
-  train_v3.py / predict_v3.py  V3 training and inference  ← use these
+  train.py / predict.py          V1
+  train_v3.py / predict_v3.py    V3 (Phase 1 best)
+  train_v4.py / predict_v4.py    V4 (Phase 2)     ← use these
   guido/
-    dataset.py    DrivingDataset, augmentation, weighted sampler
-    model.py      V1 DrivingPlanner
-    model_v2.py   V2 DrivingPlannerV2 (Transformer encoder + mixture heads)
-    model_v3.py   V3 DrivingPlannerV3 (+ 2D RoPE, speed conditioning)
-    losses.py     V1 losses
-    losses_v2.py  V2/V3 losses (WTA, coarse auxiliary, smoothness, FDE)
-    utils.py      Checkpointing and submission CSV builder
+    dataset.py    DrivingDataset, augmentation (192×304 native resize)
+    model_v3.py   DrivingPlannerV3 (2D RoPE, coarse head)
+    model_v4.py   DrivingPlannerV4 (+ aux hook registration, causal decoder)
+    aux_heads.py  AuxDecoder (DPT-light), DepthHead, SegHead, visualize_aux
+    losses_v2.py  WTA loss, coarse auxiliary, smoothness, FDE variants
+    utils.py      Checkpointing (includes aux head state), submission CSV
 
 configs/
-  V3/final.yaml      Best Phase 1 config  ← start here
-  V1/                V1 ablation suite
-  V2/                V2 architecture experiments
-  V3/                V3 experiments
+  V3/baseline.yaml    Phase 1 best               ← start here for Phase 1
+  V4/phase2.yaml      Phase 2 best               ← start here for Phase 2
+  V1/ V2/ V3/ V4/     Full ablation history
+
+notebooks/
+  explore_phase2_data.py   Data exploration script for Phase 2 dataset
 ```
 
 ---
 
 ## Reference papers
 
-Papers consulted during this project are in `docs/`:
-- TransFuser (Prakash et al., 2021) — transformer-based sensor fusion for AD
-- UniAD (Hu et al., 2022) — unified autonomous driving architecture
-- VAD (Jiang et al., 2023) — vectorised scene representation for AD
+Papers consulted (see `docs/`):
+- TransFuser (Prakash et al., 2021) — transformer sensor fusion for AD
+- UniAD (Hu et al., 2022) — unified autonomous driving
+- VAD (Jiang et al., 2023) — vectorised scene representation
