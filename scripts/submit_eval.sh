@@ -26,7 +26,7 @@ echo "Data:"
 echo "$(du -sh $DATA_DIR)"
 
 uv run src/predict_v4.py \
-    --checkpoint 'checkpoints/run_20260514_1636_epoch249_ade1.4784.pth' \
+    --checkpoint 'checkpoints/run_20260514_2015_epoch249_ade1.4764.pth' \
     --split test \
     --data-dir "$DATA_DIR" \
     --visualize \
