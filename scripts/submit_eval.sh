@@ -10,11 +10,11 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=11800M
 #SBATCH --time=01:00:00
-#SBATCH --output=logs/V4/eval_%j.out
-#SBATCH --error=logs/V4/eval_%j.err
+#SBATCH --output=logs/V5/eval_%j.out
+#SBATCH --error=logs/V5/eval_%j.err
 
 set -euo pipefail
-mkdir -p logs/V4/
+mkdir -p logs/V5/
 
 SCRATCH=/scratch/$USER/tanc
 
@@ -25,11 +25,11 @@ echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
 echo "Data:"
 echo "$(du -sh $DATA_DIR)"
 
-uv run src/predict_v4.py \
-    --checkpoint 'checkpoints/run_20260514_2015_epoch249_ade1.4764.pth' \
+uv run src/predict_v5.py \
+    --checkpoint 'checkpoints/run_20260521_2210_epoch226_ade1.2616.pth' \
     --split test \
     --data-dir "$DATA_DIR" \
     --visualize \
-    --vis-output predictions_v4.pdf
+    --vis-output predictions_v5.pdf
 
 echo "Job finished at $(date)"

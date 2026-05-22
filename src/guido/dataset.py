@@ -84,8 +84,11 @@ class DrivingDataset(Dataset):
         ]
         aug = [
             T.Resize((DINO_H, DINO_W), antialias=True),
-            T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.08),
+            # Colour/lighting variation — real scenes have much wider distribution
+            T.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.4, hue=0.1),
             T.RandomGrayscale(p=0.05),
+            # Camera blur — common in real dashcam footage
+            T.GaussianBlur(kernel_size=5, sigma=(0.1, 1.5)),
             T.ToDtype(torch.float32, scale=True),
             T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ]
@@ -102,7 +105,14 @@ class DrivingDataset(Dataset):
         with open(self.samples[idx], "rb") as f:
             data = pickle.load(f)
 
-        command = COMMAND_MAP[data["driving_command"]]
+        # driving_command: synthetic = string ('forward'/'left'/'right')
+        #                  real      = one-hot array [0,1,0,0] or absent
+        raw_cmd = data.get("driving_command", "forward")
+        if isinstance(raw_cmd, str):
+            command = COMMAND_MAP.get(raw_cmd, 0)
+        else:
+            arr = np.asarray(raw_cmd)
+            command = int(arr.argmax()) if arr.ndim > 0 else 0
         history = _encode_history(data["sdc_history_feature"])
         future  = None if self.test else data["sdc_future_feature"].astype(np.float32)
 
@@ -163,8 +173,55 @@ def make_datasets(
     return train_ds, val_ds
 
 
-def make_test_dataset(data_dir: str) -> "DrivingDataset":
+def make_datasets_mixed(
+    data_dir: str,
+    real_train_frac: float = 1.0,   # fraction of val_real to include in training
+    mirror_p: float       = 0.2,
+    hist_noise_std: float = 0.01,
+    hist_dropout_p: float = 0.1,
+    mirror_warmup: int    = 5,
+    load_aux: bool        = False,
+):
+    """
+    Phase 3: mix synthetic train + real val_real for training.
+    Validates on the held-out portion of val_real.
+
+    real_train_frac: fraction of val_real used for training (rest = val).
+    With 1000 real samples and frac=0.7: 700 real train + 300 real val.
+    """
+    import random as _random
+    synth_files = _sorted_pkl_files(os.path.join(data_dir, "train"))
+    real_dir    = os.path.join(data_dir, "val_real")
+    if not os.path.isdir(real_dir):
+        raise FileNotFoundError(
+            f"Real data not found at {real_dir}. "
+            "Run notebooks/download_phase3_data.sh first."
+        )
+    real_files = _sorted_pkl_files(real_dir)
+    n_real_train = int(len(real_files) * real_train_frac)
+    real_train   = real_files[:n_real_train]
+    real_val     = real_files[n_real_train:]
+
+    train_files = synth_files + real_train
+    # Shuffle so real and synthetic samples are interleaved
+    _random.shuffle(train_files)
+
+    train_ds = DrivingDataset(
+        train_files,
+        augment=True, mirror_p=mirror_p,
+        hist_noise_std=hist_noise_std, hist_dropout_p=hist_dropout_p,
+        mirror_warmup=mirror_warmup, load_aux=load_aux,
+    )
+    # If no real val samples remain, fall back to synthetic val
+    val_files = real_val if real_val else _sorted_pkl_files(os.path.join(data_dir, "val"))
+    val_ds = DrivingDataset(val_files, augment=False, load_aux=False)
+
+    return train_ds, val_ds
+
+
+def make_test_dataset(data_dir: str, real: bool = False) -> "DrivingDataset":
+    subdir = "test_public_real" if real else "test_public"
     return DrivingDataset(
-        _sorted_pkl_files(os.path.join(data_dir, "test_public")),
+        _sorted_pkl_files(os.path.join(data_dir, subdir)),
         augment=False, test=True,
     )

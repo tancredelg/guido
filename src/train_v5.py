@@ -1,9 +1,9 @@
 """
-train_v3_phase2.py — Phase 2 training: trajectory + depth + segmentation aux tasks.
+train_v5.py — Phase 3 sim-to-real fine-tuning on mixed synthetic + real data.
 
 Usage:
-    uv run src/train_v3_phase2.py --config configs/V3/phase2.yaml
-    uv run src/train_v3_phase2.py --config configs/V3/phase2.yaml --no-wandb
+    uv run src/train_v5.py --config configs/V5/phase3.yaml
+    uv run src/train_v5.py --config configs/V5/phase3.yaml --no-wandb
 """
 
 import argparse
@@ -21,10 +21,9 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from guido.dataset    import make_datasets, make_test_dataset
+from guido.dataset    import make_datasets, make_datasets_mixed, make_test_dataset
 from guido.model_v4   import DrivingPlannerV4
-from guido.aux_heads  import (AuxDecoder, DepthHead, SegHead,
-                               depth_loss, seg_loss, normals_loss, visualize_aux)
+
 from guido.losses_v2  import winner_takes_all_loss, ade, fde, best_of_k_ade
 from guido.utils      import (
     seed_everything, save_checkpoint, load_checkpoint,
@@ -198,13 +197,24 @@ def train(cfg: dict, use_wandb: bool) -> None:
     log.info("Device: %s", device)
 
     # ── Datasets ──────────────────────────────────────────────────────────
-    train_ds, val_ds = make_datasets(
-        cfg["data_dir"],
-        mirror_p       = cfg.get("mirror_p",       0.0),
-        hist_noise_std = cfg.get("hist_noise_std", 0.0),
-        mirror_warmup  = cfg.get("mirror_warmup",  10),
-        load_aux       = cfg.get("use_depth_aux",  True) or cfg.get("use_seg_aux", True),
-    )
+    use_real_data = cfg.get("use_real_data", True)
+    if use_real_data:
+        train_ds, val_ds = make_datasets_mixed(
+            cfg["data_dir"],
+            real_train_frac = cfg.get("real_train_frac", 0.8),
+            mirror_p        = cfg.get("mirror_p",        0.2),
+            hist_noise_std  = cfg.get("hist_noise_std",  0.01),
+            hist_dropout_p  = cfg.get("hist_dropout_p",  0.1),
+            mirror_warmup   = cfg.get("mirror_warmup",   5),
+        )
+    else:
+        train_ds, val_ds = make_datasets(
+            cfg["data_dir"],
+            mirror_p       = cfg.get("mirror_p",        0.2),
+            hist_noise_std = cfg.get("hist_noise_std",  0.01),
+            hist_dropout_p = cfg.get("hist_dropout_p",  0.1),
+            mirror_warmup  = cfg.get("mirror_warmup",   5),
+        )
     log.info("Train: %d  Val: %d", len(train_ds), len(val_ds))
 
     # Optionally use trajectory-length weighted sampling
@@ -234,21 +244,19 @@ def train(cfg: dict, use_wandb: bool) -> None:
         dino_repo_dir     = cfg["dino_repo_dir"],
         dino_weights      = cfg["dino_weights"],
         unfreeze_blocks   = cfg.get("unfreeze_blocks",    2),
-        cmd_embed_dim     = cfg.get("cmd_embed_dim",      64),
-        use_cmd           = cfg.get("use_cmd",            False),
-        scene_fusion      = cfg.get("scene_fusion",       "rope_xattn"),  # "rope_xattn" | "none"
         d                 = cfg.get("d",                  384),
         num_heads         = cfg.get("num_heads",          4),
-        # rope_grid_size    = cfg.get("rope_grid_size",     16),
-        rope_base         = cfg.get("rope_base",          10000.0),
         hist_layers       = cfg.get("hist_layers",        2),
         dec_layers        = cfg.get("dec_layers",         3),
-        causal_decoder    = cfg.get("causal_decoder",     False),
         K                 = cfg.get("K",                  1),
         n_coarse          = cfg.get("n_coarse",           6),
         dropout           = cfg.get("dropout",            0.05),
         smoothness_weight = cfg.get("smoothness_weight",  0.05),
-        # speed_cond        = cfg.get("speed_cond",         True),
+        cmd_embed_dim     = cfg.get("cmd_embed_dim",      64),
+        rope_base         = cfg.get("rope_base",          10000.0),
+        use_cmd           = cfg.get("use_cmd",            False),
+        scene_fusion      = cfg.get("scene_fusion",       "rope_xattn"),
+        causal_decoder    = cfg.get("causal_decoder",     False),
     ).to(device)
     log.info("Trajectory model trainable params: %s", f"{model.num_trainable_params():,}")
 
@@ -256,6 +264,7 @@ def train(cfg: dict, use_wandb: bool) -> None:
     # Built only when at least one aux task is enabled in config.
     use_depth = cfg.get("use_depth_aux", True)
     use_seg   = cfg.get("use_seg_aux",   True)
+    log.info("Aux tasks — depth: %s  seg: %s", use_depth, use_seg)
     num_seg_classes = cfg.get("num_seg_classes", 20)   # set after data exploration
     dino_dim  = model.backbone.embed_dim
     img_h     = cfg.get("img_h", 200)
@@ -271,7 +280,7 @@ def train(cfg: dict, use_wandb: bool) -> None:
     grid_h = grid_w = dino_input // patch_size   # always 16×16
 
     aux_decoder, depth_head, seg_head = None, None, None
-    use_normals = cfg.get("use_normals_aux", True)   # free from depth GT
+    use_normals = cfg.get("use_normals_aux", True)
     if use_depth or use_seg:
         aux_decoder = AuxDecoder(
             d_backbone = dino_dim,
@@ -286,10 +295,11 @@ def train(cfg: dict, use_wandb: bool) -> None:
         aux_params = (list(aux_decoder.parameters())
                       + (list(depth_head.parameters()) if depth_head else [])
                       + (list(seg_head.parameters())   if seg_head   else []))
-        log.info("Aux decoder params: %s", f"{sum(p.numel() for p in aux_params):,}")
+        log.info("Aux decoder BUILT — params: %s", f"{sum(p.numel() for p in aux_params):,}")
     else:
         aux_params  = []
         use_normals = False
+        log.warning("Aux decoder NOT built — use_depth_aux and use_seg_aux both False")
 
     # ── Optimiser ─────────────────────────────────────────────────────────
     base_lr     = cfg.get("lr",          1e-4)
@@ -330,7 +340,7 @@ def train(cfg: dict, use_wandb: bool) -> None:
     # local optima rather than decaying monotonically into one.
     T_0 = cfg.get("lr_restart_epochs", max(num_epochs // 4, 50))
     cosine = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=T_0, T_mult=10,
+        optimizer, T_0=T_0, T_mult=1,
         eta_min=cfg.get("min_lr", 5e-7),
     )
     warmup = optim.lr_scheduler.LinearLR(
@@ -353,17 +363,23 @@ def train(cfg: dict, use_wandb: bool) -> None:
         best_ade    = ckpt["val_ade"]
         log.info("Resumed epoch %d (best ADE %.4f)", start_epoch, best_ade)
     elif cfg.get("warm_start"):
-        # Load trajectory weights only (no optimizer state, no aux weights).
-        # Useful to initialise Phase 2 from Phase 1 best checkpoint so the
-        # trajectory branch starts at ~1.53 ADE instead of random.
         ckpt = torch.load(cfg["warm_start"], map_location=device)
         state = ckpt.get("model", ckpt)
         missing, unexpected = model.load_state_dict(state, strict=False)
         non_aux_missing = [k for k in missing if "aux" not in k and "router" not in k]
         if non_aux_missing:
-            log.warning("Warm-start: non-aux keys missing: %s", non_aux_missing)
-        log.info("Warm-start from %s — missing %d keys (aux decoder expected)",
-                 cfg["warm_start"], len(missing))
+            log.warning("Warm-start: unexpected missing keys: %s", non_aux_missing)
+        log.info("Warm-start from %s — missing %d model keys", cfg["warm_start"], len(missing))
+        # Restore aux decoder if present in checkpoint
+        if aux_decoder is not None and "aux_decoder" in ckpt:
+            aux_decoder.load_state_dict(ckpt["aux_decoder"])
+            log.info("  Loaded aux_decoder weights from checkpoint")
+        if depth_head is not None and "depth_head" in ckpt:
+            depth_head.load_state_dict(ckpt["depth_head"])
+            log.info("  Loaded depth_head weights from checkpoint")
+        if seg_head is not None and "seg_head" in ckpt:
+            seg_head.load_state_dict(ckpt["seg_head"])
+            log.info("  Loaded seg_head weights from checkpoint")
 
     run         = init_wandb(cfg, enabled=use_wandb)
     grad_clip   = cfg.get("grad_clip",    1.0)
@@ -409,9 +425,6 @@ def train(cfg: dict, use_wandb: bool) -> None:
         train_ds.set_epoch(epoch)
         model.train()
         train_loss = 0.0
-        train_loss_depth = 0.0
-        train_loss_seg = 0.0
-        train_loss_norm = 0.0
         t0 = time.time()
 
         for step, batch in enumerate(train_loader):
@@ -476,11 +489,8 @@ def train(cfg: dict, use_wandb: bool) -> None:
                     torch.nn.utils.clip_grad_norm_(aux_decoder.parameters(), grad_clip)
             optimizer.step()
 
-            train_loss       += loss.item()
-            train_loss_depth += l_depth.item()
-            train_loss_seg   += l_seg.item()
-            train_loss_norm  += l_normals.item()
-            global_step      += 1
+            train_loss  += loss.item()
+            global_step += 1
 
             if (step + 1) % log_every == 0:
                 w_counts = winner.bincount(minlength=cfg.get("K", 1)).float()
@@ -494,8 +504,8 @@ def train(cfg: dict, use_wandb: bool) -> None:
                     **{f"train/head_{k}_win_frac": w_frac[k].item()
                        for k in range(len(w_frac))},
                 })
-                log.info("  epoch %d  step %d/%d  loss %.5f  "
-                         "depth %.5f  seg %.5f",
+                log.info("  epoch %d  step %d/%d  loss %.4f  "
+                         "depth %.4f  seg %.4f",
                          epoch + 1, step + 1, len(train_loader),
                          loss.item(), l_depth.item(), l_seg.item())
 
@@ -553,19 +563,14 @@ def train(cfg: dict, use_wandb: bool) -> None:
         # and log router_ade separately so we can see when it converges to bofk.
         router_active = (epoch >= router_warmup_epochs) or (K == 1)
         log_metrics = {
-            "train/loss":         train_loss / len(train_loader),
-            "train/loss_depth":   train_loss_depth / len(train_loader),
-            "train/loss_seg":     train_loss_seg / len(train_loader),
-            "train/loss_normals": train_loss_norm / len(train_loader),
-            "train/lr":           lr_now,
-            "val/ade":            metrics["val/bofk_ade"],        # always the honest number
-            "val/router_ade":     metrics["val/ade"],             # random during warmup, real after
+            "train/loss":      train_loss / len(train_loader),
+            "train/lr":        lr_now,
+            "val/ade":         metrics["val/bofk_ade"],        # always the honest number
+            "val/router_ade":  metrics["val/ade"],             # random during warmup, real after
             **{k: v for k, v in metrics.items()
                if k not in ("val/ade",)},
-            "epoch":              epoch + 1,
-            "router_active":      int(router_active),
-            "train/lambda_depth": lam_depth,
-            "train/lambda_seg":   lam_seg,
+            "epoch":           epoch + 1,
+            "router_active":   int(router_active),
         }
         wandb_log(run, global_step, log_metrics)
 
@@ -607,7 +612,7 @@ def train(cfg: dict, use_wandb: bool) -> None:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config",        default="configs/V4/phase2.yaml")
+    parser.add_argument("--config",        default="configs/v3_baseline.yaml")
     parser.add_argument("--data-dir",      default=None)
     parser.add_argument("--dino-repo-dir", default=None)
     parser.add_argument("--dino-weights",  default=None)
