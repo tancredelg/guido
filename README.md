@@ -1,12 +1,13 @@
 # Guido — End-to-End Trajectory Prediction for Autonomous Driving
 
-A crowd-favourite Cars character, now re-incarnated as an end-to-end neural 
-trajectory planner that predicts 60 future waypoints from a single front-facing 
-camera image, ego-motion history, and a high-level driving command. Trained and 
-evaluated on a subset of the [nuPlan](https://www.nuplan.org/) dataset.
+An end-to-end neural trajectory planner that predicts 60 future waypoints from
+a single front-facing camera image, ego-motion history, and a high-level
+driving command. Trained and evaluated on a subset of the
+[nuPlan](https://www.nuplan.org/) dataset.
 
-**Phase 1 result: val ADE ≈ 1.53 m** over a 6-second horizon.  
-**Phase 2 result: val ADE ≈ 1.48 m** with auxiliary depth + segmentation tasks.
+**Phase 1 result: 1st place**, val ADE ≈ 1.53 m over a 6-second horizon.  
+**Phase 2 result: 2nd place**, val ADE ≈ 1.48 m with auxiliary depth + segmentation tasks.  
+**Phase 3 result: 1st place**, test ADE ≈ 0.98 m — sim-to-real generalisation on real driving data.
 
 ---
 
@@ -59,8 +60,9 @@ giving a 12×19 patch grid that preserves the original aspect ratio.
 | V1 + ViT-B backbone | 1.90 | |
 | V2 (Transformer history encoder) | 1.57 | |
 | V2 large + coarse-to-fine | 1.54 | |
-| V3 (2D RoPE, best Phase 1) | **1.53** | Best Phase 1 |
-| V4 + aux tasks (Phase 2) | **1.48** | Best Phase 2 |
+| V3 (2D RoPE, best Phase 1) | **1.53** | 1st place Phase 1 |
+| V4 + aux tasks (Phase 2) | **1.48** | 2nd place Phase 2 |
+| V5 + real data fine-tune (Phase 3) | **0.98** | **1st place Phase 3** |
 
 ---
 
@@ -80,18 +82,18 @@ source of error.
 ## Installation
 
 ```bash
-git clone https://github.com/tancredelg/guido
+git clone https://github.com/<you>/guido
 cd guido
 uv sync
 ```
 
 **DINOv3 weights**: request access from Meta via the
-[DINOv3 GitHub repo](https://github.com/facebookresearch/dinov3).
+[DINOv2 model card](https://github.com/facebookresearch/dinov2).
 Download `dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth` and set
 `dino_repo_dir` / `dino_weights` in your config.
 
 **Dataset**: a 2.6 GB subset of nuPlan (5k train / 1k val / 1k test).
-Kaggle competition (Phase 2): [dlav-trajectory-prediction](https://www.kaggle.com/competitions/dlav-trajectory-prediction-phase2).
+Kaggle competition: [dlav-trajectory-prediction](https://www.kaggle.com/competitions/dlav-trajectory-prediction-phase1).
 For broader experiments the full [nuPlan dataset](https://www.nuplan.org/)
 can be used with minor changes to `dataset.py`.
 
@@ -111,11 +113,17 @@ uv run src/train_v3.py --config configs/V3/baseline.yaml
 # Train (Phase 2, with aux tasks)
 uv run src/train_v4.py --config configs/V4/phase2.yaml
 
-# Validate
+# Train (Phase 3, sim-to-real fine-tune on mixed data)
+uv run src/train_v5.py --config configs/V5/phase3.yaml
+
+# Validate (Phase 2)
 uv run src/predict_v4.py --checkpoint checkpoints/best.pth --split val
 
-# Generate Kaggle submission
-uv run src/predict_v4.py --checkpoint checkpoints/best.pth --split test \
+# Validate (Phase 3, real val set)
+uv run src/predict_v5.py --checkpoint checkpoints/best.pth --split val
+
+# Generate Kaggle submission (Phase 3 real test)
+uv run src/predict_v5.py --checkpoint checkpoints/best.pth --split test \
     --output submission.csv
 
 # Test-time augmentation (mirror flip + average)
@@ -203,7 +211,7 @@ modest improvement on `val/ade_far` (~3.1 → ~2.9) but results are inconclusive
 at this data scale.
 
 **Conclusion**: aux tasks trained well and improved trajectory ADE from 1.53
-to ~1.476 (~4% gain). However, the improvement is modest relative to the
+to ~1.48 (~4% gain). However, the improvement is modest relative to the
 added complexity. The depth/seg heads appear to primarily regularise the
 backbone rather than teach it fundamentally new spatial reasoning — the
 representations were already strong from DINOv3 pretraining. The real ceiling
@@ -211,8 +219,7 @@ is the 5k training set, single forward camera, and absence of map information.
 Future phases introducing BEV representations or larger datasets would be the
 natural next step.
 
-Best Phase 2 config (for cold start): `configs/V4/p2-uf2-xattn_fuse-nocmd+.yaml` (ADE ~1.49).
-- Warm-start from the best checkpoint of this config, using `configs/V4/p2-final.yaml` (ADE ~1.476).
+Best Phase 2 config: `configs/V4/p2-uf2-xattn_fuse-nocmd+.yaml` (val ADE ~1.48–1.49 cold-start; ~1.48 after fine-tuning from best checkpoint).
 
 ---
 
@@ -222,7 +229,8 @@ Best Phase 2 config (for cold start): `configs/V4/p2-uf2-xattn_fuse-nocmd+.yaml`
 src/
   train.py / predict.py          V1
   train_v3.py / predict_v3.py    V3 (Phase 1 best)
-  train_v4.py / predict_v4.py    V4 (Phase 2)     ← use these
+  train_v4.py / predict_v4.py    V4 (Phase 2)
+  train_v5.py / predict_v5.py    V5 (Phase 3)     ← use these for real-world
   guido/
     dataset.py    DrivingDataset, augmentation (192×304 native resize)
     model_v3.py   DrivingPlannerV3 (2D RoPE, coarse head)
@@ -234,13 +242,54 @@ src/
 configs/
   V3/baseline.yaml    Phase 1 best               ← start here for Phase 1
   V4/phase2.yaml      Phase 2 best               ← start here for Phase 2
-  V1/ V2/ V3/ V4/     Full ablation history
+  V5/phase3.yaml      Phase 3 best               ← start here for Phase 3
+  V1/ V2/ V3/ V4/ V5/ Full ablation history
 
 notebooks/
   explore_phase2_data.py   Data exploration script for Phase 2 dataset
 ```
 
 ---
+
+
+### Phase 3 — V5 sim-to-real generalisation
+
+Phase 3 evaluates on a held-out real-world driving dataset. The training set
+remains the same 5k synthetic nuPlan samples from Phases 1–2; a 1k-sample
+real-world validation set (`val_real/`) is provided for adaptation, and
+the test set is 864 real-world samples.
+
+**Key finding from data exploration**: both synthetic and real data use the same
+ego-relative coordinate system (current position always at origin, x = forward,
+y = lateral). No coordinate normalisation was needed between domains — the domain
+gap is purely visual (lighting, texture, weather, camera noise).
+
+**Strategy**: warm-start from the Phase 2 best checkpoint (val ADE 1.48) and
+fine-tune on a mixture of all 5k synthetic samples and 95% of the 1k real samples.
+The Phase 2 checkpoint already knows the trajectory task structure; the fine-tuning
+teaches it to read real camera imagery.
+
+**What worked**:
+- Warm-start from Phase 2 (critical — scratch runs converge to the same floor but slower)
+- Using 950/1000 real samples for training, only 50 for local validation
+- Stronger augmentation: `mirror_p=0.4`, `GaussianBlur`, `ColorJitter` with wider ranges
+- Higher backbone LR than Phase 2 fine-tuning (`backbone_lr=7e-5`) to let DINOv3 features adapt to real imagery
+- The test distribution turned out to be more favourable than val (test ADE ~0.75× val ADE)
+
+**Result**: val ADE ~1.26, test ADE **0.98** — 1st place on the Phase 3 leaderboard.
+
+**Further improvements not yet explored**:
+- *Multi-seed ensembling*: training 3 models with different seeds and averaging
+  predictions. With only 1k real samples, variance is high and ensembling should
+  give ~0.05–0.10 ADE improvement for free.
+- *Test-time augmentation*: mirror-flip + average at inference (already implemented
+  in `predict_v5.py --tta`).
+- *Progressive unfreezing*: start with backbone frozen, unfreeze blocks gradually
+  as real-domain loss stabilises — would reduce forgetting of synthetic knowledge.
+- *Real-data oversampling*: weighting real samples 2–3× higher than synthetic in
+  the mixed batch, since test distribution is real-only.
+
+Best config: `configs/V5/phase3.yaml`.
 
 ## Reference papers
 
