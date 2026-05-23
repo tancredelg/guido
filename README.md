@@ -5,9 +5,9 @@ a single front-facing camera image, ego-motion history, and a high-level
 driving command. Trained and evaluated on a subset of the
 [nuPlan](https://www.nuplan.org/) dataset.
 
-**Phase 1 result: 1st place**, val ADE ≈ 1.53 m over a 6-second horizon.  
-**Phase 2 result: 2nd place**, val ADE ≈ 1.48 m with auxiliary depth + segmentation tasks.  
-**Phase 3 result: 1st place**, test ADE ≈ 0.98 m — sim-to-real generalisation on real driving data.
+**Phase 1 result: 1st place**, test ADE ≈ 1.535 m over a 6-second horizon.  
+**Phase 2 result: 2nd place**, test ADE ≈ 1.509 m with auxiliary depth + segmentation tasks.  
+**Phase 3 result: 1st place**, test ADE ≈ 1.023 m — sim-to-real generalisation on real driving data.
 
 ---
 
@@ -54,15 +54,15 @@ giving a 12×19 patch grid that preserves the original aspect ratio.
 
 ## Results
 
-| Model | Val ADE | Notes |
+| Model | ADE | Notes |
 |---|---|---|
 | V1 baseline (ViT-S, GRU, MLP decoder) | 1.96 | Course baseline |
 | V1 + ViT-B backbone | 1.90 | |
 | V2 (Transformer history encoder) | 1.57 | |
 | V2 large + coarse-to-fine | 1.54 | |
-| V3 (2D RoPE, best Phase 1) | **1.53** | 1st place Phase 1 |
-| V4 + aux tasks (Phase 2) | **1.48** | 2nd place Phase 2 |
-| V5 + real data fine-tune (Phase 3) | **0.98** | **1st place Phase 3** |
+| V3 (2D RoPE, best Phase 1) | **1.535** (kaggle test) | 1st place Phase 1 |
+| V4 + aux tasks (Phase 2) | **1.509** (kaggle test) | 2nd place Phase 2 |
+| V5 + real data fine-tune (Phase 3) | **1.023** (kaggle test) | 1st place Phase 3 |
 
 ---
 
@@ -82,18 +82,18 @@ source of error.
 ## Installation
 
 ```bash
-git clone https://github.com/<you>/guido
+git clone https://github.com/tancredelg/guido
 cd guido
 uv sync
 ```
 
 **DINOv3 weights**: request access from Meta via the
-[DINOv2 model card](https://github.com/facebookresearch/dinov2).
+[DINOv3 model card](https://github.com/facebookresearch/dinov3).
 Download `dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth` and set
 `dino_repo_dir` / `dino_weights` in your config.
 
 **Dataset**: a 2.6 GB subset of nuPlan (5k train / 1k val / 1k test).
-Kaggle competition: [dlav-trajectory-prediction](https://www.kaggle.com/competitions/dlav-trajectory-prediction-phase1).
+Kaggle competition: [dlav-trajectory-prediction](https://www.kaggle.com/competitions/dlav-2026-phase-3/leaderboard).
 For broader experiments the full [nuPlan dataset](https://www.nuplan.org/)
 can be used with minor changes to `dataset.py`.
 
@@ -276,7 +276,7 @@ teaches it to read real camera imagery.
 - Higher backbone LR than Phase 2 fine-tuning (`backbone_lr=7e-5`) to let DINOv3 features adapt to real imagery
 - The test distribution turned out to be more favourable than val (test ADE ~0.75× val ADE)
 
-**Result**: val ADE ~1.26, test ADE **0.98** — 1st place on the Phase 3 leaderboard.
+**Result**: val ADE ~1.26, test ADE **1.023** — 1st place on the Phase 3 leaderboard.
 
 **Further improvements not yet explored**:
 - *Multi-seed ensembling*: training 3 models with different seeds and averaging
